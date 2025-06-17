@@ -12,19 +12,22 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, Receiver, Sender};
 
-mod block_template;
-mod cli;
-mod rpc;
-mod zmq;
-mod braid;
 mod bead;
+mod block_template;
+mod braid;
 mod braid_functions;
+mod cli;
 mod committed_metadata;
+mod rpc;
+mod rpc_server;
 mod uncommitted_metadata;
 mod utils;
-mod rpc_server;
+mod zmq;
+use rpc_server::run_rpc_server;
+
+use crate::rpc_server::parse_arguments;
 #[derive(NetworkBehaviour)]
 struct NodeBehaviour {
     identify: libp2p::identify::Behaviour,
@@ -33,11 +36,30 @@ struct NodeBehaviour {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let args = cli::Cli::parse();
+    let (sender, mut receiver): (Sender<String>, Receiver<String>) = mpsc::channel(32);
 
+    let args = cli::Cli::parse();
+    if args.rpc != None {}
     setup_logging();
     setup_tracing()?;
 
+    if args.rpc == None {
+        //running the rpc server
+        tokio::spawn(run_rpc_server());
+    } else if args.rpc != None {
+        let server_address = tokio::spawn(run_rpc_server());
+        let socket_address = server_address.await.unwrap().unwrap();
+        tokio::spawn(parse_arguments(
+            args.clone(),
+            socket_address.clone(),
+            sender.clone(),
+        ));
+
+        while let Some(message) = receiver.recv().await {
+            log::info!("RPC RESPONSE = {message}");
+            break;
+        }
+    }
     let datadir = shellexpand::full(args.datadir.to_str().unwrap()).unwrap();
     match fs::metadata(&*datadir) {
         Ok(m) => {
@@ -235,3 +257,8 @@ fn setup_tracing() -> Result<(), Box<dyn Error>> {
 
     Ok(())
 }
+/*
+
+
+
+*/

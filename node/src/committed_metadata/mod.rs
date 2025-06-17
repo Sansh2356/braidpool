@@ -42,7 +42,7 @@ impl Decodable for TimeVec {
     }
 }
 
-#[derive(Clone, Debug, PartialEq,Serialize)]
+#[derive(Clone, Debug, PartialEq,Serialize,Deserialize)]
 pub struct CommittedMetadata {
     pub transactions: Vec<Transaction>,
     pub parents: HashSet<BeadHash>,
