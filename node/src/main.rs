@@ -18,7 +18,13 @@ mod block_template;
 mod cli;
 mod rpc;
 mod zmq;
-
+mod braid;
+mod bead;
+mod braid_functions;
+mod committed_metadata;
+mod uncommitted_metadata;
+mod utils;
+mod rpc_server;
 #[derive(NetworkBehaviour)]
 struct NodeBehaviour {
     identify: libp2p::identify::Behaviour,

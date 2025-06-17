@@ -9,6 +9,7 @@ use bitcoin::p2p::Address as P2P_Address;
 use bitcoin::CompactTarget;
 use bitcoin::PublicKey;
 use bitcoin::Transaction;
+use clap::builder::Str;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -41,12 +42,12 @@ impl Decodable for TimeVec {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq,Serialize)]
 pub struct CommittedMetadata {
     pub transactions: Vec<Transaction>,
     pub parents: HashSet<BeadHash>,
     pub parent_bead_timestamps: TimeVec,
-    pub payout_address: P2P_Address,
+    pub payout_address: String,
     pub start_timestamp: Time,
     pub comm_pub_key: PublicKey,
     //minimum possible target > which will be the weak target
@@ -54,7 +55,7 @@ pub struct CommittedMetadata {
     //the weaker target locallay apart from mainnet target ranging between the mainnet target and
     //minimum possible target
     pub weak_target: CompactTarget,
-    pub miner_ip: AddrV2,
+    pub miner_ip: String
 }
 
 impl Encodable for CommittedMetadata {
@@ -82,12 +83,12 @@ impl Decodable for CommittedMetadata {
         let transactions = Vec::<Transaction>::consensus_decode(r)?;
         let parents = vec_to_hashset(Vec::<BeadHash>::consensus_decode(r)?);
         let parent_bead_timestamps = TimeVec::consensus_decode(r)?;
-        let payout_address = P2P_Address::consensus_decode(r)?;
+        let payout_address = String::consensus_decode(r)?;
         let start_timestamp = Time::from_consensus(u32::consensus_decode(r).unwrap()).unwrap();
         let comm_pub_key = PublicKey::from_slice(&Vec::<u8>::consensus_decode(r).unwrap()).unwrap();
         let min_target = CompactTarget::consensus_decode(r).unwrap();
         let weak_target = CompactTarget::consensus_decode(r).unwrap();
-        let miner_ip = AddrV2::consensus_decode(r)?;
+        let miner_ip = String::consensus_decode(r)?;
         Ok(CommittedMetadata {
             transactions,
             parents,

@@ -5,8 +5,9 @@ use bitcoin::consensus::encode::Encodable;
 use bitcoin::consensus::Error;
 use bitcoin::io::{self, BufRead, Write};
 use bitcoin::BlockHeader;
+use serde::Serialize;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq,Serialize)]
 pub struct Bead {
     pub block_header: BlockHeader,
     pub committed_metadata: CommittedMetadata,
