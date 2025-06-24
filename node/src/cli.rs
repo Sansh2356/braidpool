@@ -1,7 +1,7 @@
 use clap::Parser;
 use std::path::PathBuf;
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug,Clone)]
 pub struct Cli {
     /// Braid data directory
     #[arg(long, default_value = "~/.braidpool/")]
@@ -21,7 +21,7 @@ pub struct Cli {
     pub bitcoin: String,
 
     /// Use this port for bitcoin RPC
-    #[arg(long, default_value = "8332")]
+    #[arg(long, default_value = "18443")]
     pub rpcport: u16,
 
     /// Use this username for bitcoin RPC
@@ -33,14 +33,16 @@ pub struct Cli {
     pub rpcpass: Option<String>,
 
     /// Which network to use. Valid options are mainnet, testnet4, signet, cpunet (preferred)
-    #[arg(long, default_value = "main")]
+    #[arg(long, default_value = "reg")]
     pub network: Option<String>,
 
     /// Use this cookie file for bitcoin RPC
-    #[arg(long, default_value = "~/.bitcoin/.cookie")]
+    #[arg(long, default_value = "~/.bitcoin/regtest/.cookie")]
     pub rpccookie: Option<String>,
 
     /// Use this port for bitcoin ZMQ
     #[arg(long, default_value = "28332")]
     pub zmqhashblockport: u16,
+    #[arg(long,value_delimiter = ',',num_args = 1..)]
+    pub rpc: Option<Vec<String>>,
 }

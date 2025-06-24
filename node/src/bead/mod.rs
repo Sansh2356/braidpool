@@ -11,8 +11,11 @@ use libp2p::futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use libp2p::request_response::Codec;
 use libp2p::StreamProtocol;
 use std::collections::HashSet;
+use serde::Deserialize;
+use serde::Serialize;
 
-#[derive(Clone, Debug, PartialEq)]
+
+#[derive(Clone, Debug, PartialEq,Serialize,Deserialize)]
 pub struct Bead {
     pub block_header: BlockHeader,
     pub committed_metadata: CommittedMetadata,

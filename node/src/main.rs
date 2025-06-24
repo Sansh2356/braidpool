@@ -15,14 +15,23 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 use std::{collections::HashSet, error::Error};
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, Receiver, Sender};
+use crate::rpc_server::parse_arguments;
 
+
+mod bead;
 mod block_template;
+mod braid;
+mod braid_functions;
 mod cli;
 mod config;
+mod committed_metadata;
 mod rpc;
+mod rpc_server;
+mod uncommitted_metadata;
+mod utils;
 mod zmq;
-
+use rpc_server::run_rpc_server;
 use behaviour::{BraidPoolBehaviour, BraidPoolBehaviourEvent};
 
 use crate::behaviour::KADPROTOCOLNAME;
@@ -33,12 +42,32 @@ const SEED_DNS: &str = "/dnsaddr/french.braidpool.net";
 //combined addr for dns resolution and dialing of boot for peer discovery
 const ADDR_REFRENCE: &str =
     "/dnsaddr/french.braidpool.net/p2p/12D3KooWCXH2BiENJ7NkFUBSavd8Ed4ZSYKNdiFnYP5abSo36rGL";
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let (sender, mut receiver): (Sender<String>, Receiver<String>) = mpsc::channel(32);
+
     let args = cli::Cli::parse();
+    if args.rpc != None {}
     setup_logging();
     setup_tracing()?;
+
+    if args.rpc == None {
+        //running the rpc server
+        tokio::spawn(run_rpc_server());
+    } else if args.rpc != None {
+        let server_address = tokio::spawn(run_rpc_server());
+        let socket_address = server_address.await.unwrap().unwrap();
+        tokio::spawn(parse_arguments(
+            args.clone(),
+            socket_address.clone(),
+            sender.clone(),
+        ));
+
+        while let Some(message) = receiver.recv().await {
+            log::info!("RPC RESPONSE = {message}");
+            break;
+        }
+    }
     let datadir = shellexpand::full(args.datadir.to_str().unwrap()).unwrap();
     match fs::metadata(&*datadir) {
         Ok(m) => {
@@ -346,3 +375,8 @@ fn setup_tracing() -> Result<(), Box<dyn Error>> {
 
     Ok(())
 }
+/*
+
+
+
+*/
