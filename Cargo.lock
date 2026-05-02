@@ -591,6 +591,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "braidpool-common"
+version = "0.1.0"
+dependencies = [
+ "bitcoin",
+]
+
+[[package]]
 name = "bs58"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
