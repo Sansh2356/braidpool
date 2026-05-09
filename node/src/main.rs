@@ -309,35 +309,35 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     //adding the boot nodes for peer discovery
     swarm.listen_on(multi_addr.clone())?;
-    for boot_peer in BOOTNODES {
-        let peer_id = match boot_peer.parse::<PeerId>() {
-            Ok(id) => id,
-            Err(e) => {
-                error!(boot_peer = %boot_peer, error = %e, "Failed to parse boot peer ID, skipping");
-                continue;
-            }
-        };
-        let seed_addr = match SEED_DNS.parse::<Multiaddr>() {
-            Ok(addr) => addr,
-            Err(e) => {
-                error!(seed_dns = %SEED_DNS, error = %e, "Failed to parse seed DNS, skipping");
-                continue;
-            }
-        };
-        swarm
-            .behaviour_mut()
-            .kademlia
-            .add_address(&peer_id, seed_addr);
-    }
-    info!(boot_node_count = %BOOTNODES.len(), "Boot nodes added to DHT");
-    let boot_addr: Multiaddr = ADDR_REFRENCE.parse().map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("Failed to parse boot address: {}", e),
-        )
-    })?;
-    swarm.dial(boot_addr)?;
-    info!(address = %ADDR_REFRENCE, "Dialed boot node");
+    // for boot_peer in BOOTNODES {
+    //     let peer_id = match boot_peer.parse::<PeerId>() {
+    //         Ok(id) => id,
+    //         Err(e) => {
+    //             error!(boot_peer = %boot_peer, error = %e, "Failed to parse boot peer ID, skipping");
+    //             continue;
+    //         }
+    //     };
+    //     let seed_addr = match SEED_DNS.parse::<Multiaddr>() {
+    //         Ok(addr) => addr,
+    //         Err(e) => {
+    //             error!(seed_dns = %SEED_DNS, error = %e, "Failed to parse seed DNS, skipping");
+    //             continue;
+    //         }
+    //     };
+    //     swarm
+    //         .behaviour_mut()
+    //         .kademlia
+    //         .add_address(&peer_id, seed_addr);
+    // }
+    // info!(boot_node_count = %BOOTNODES.len(), "Boot nodes added to DHT");
+    // let boot_addr: Multiaddr = ADDR_REFRENCE.parse().map_err(|e| {
+    //     std::io::Error::new(
+    //         std::io::ErrorKind::InvalidInput,
+    //         format!("Failed to parse boot address: {}", e),
+    //     )
+    // })?;
+    // swarm.dial(boot_addr)?;
+    // info!(address = %ADDR_REFRENCE, "Dialed boot node");
     //IPC(inter process communication) based `getblocktemplate` and `notification` to send to the downstream via the `cmempoold` architecture
     info!(socket = %args.ipc_socket, "IPC socket path");
 
@@ -348,7 +348,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             "testnet" | "testnet4" => Network::Testnet(bitcoin::TestnetVersion::V4),
             "signet" => Network::Signet,
             "regtest" => Network::Regtest,
-            "cpunet" => Network::CPUNet,
+            // "cpunet" => Network::CPUNet,
             _ => {
                 error!(
                     network = %network_name,
@@ -912,9 +912,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         }
                                     };
 
-                                    // Collect orphans for batch insertion
                                     let mut all_removed_orphans = Vec::new();
                                     let mut bead_index_mapping = HashMap::new();
+                                    let mut added_beads: Vec<Bead> = Vec::new();
 
                                     for bead in beads.iter() {
                                         let mut braid_data = braid.write().await;
@@ -947,6 +947,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                 all_removed_orphans.extend(removed_orphans);
                                             }
 
+                                            added_beads.push(bead.clone());
+
                                             // Update score of the peer
                                             {
                                                 let mut peer_manager = peer_manager_arc.write().await;
@@ -958,17 +960,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     }
 
                                     // Perform batch insertion for all successfully added beads
-                                    if !beads.to_vec().is_empty() {
+                                    if !added_beads.is_empty() || !all_removed_orphans.is_empty() {
+                                        let inserted_count = added_beads.len();
                                         match db_tx.send(node::db::BraidpoolDBTypes::InsertTupleTypes {
                                             query: node::db::InsertTupleTypes::InsertBeadsBatch {
-                                                beads_to_insert:beads.to_vec(),
+                                                beads_to_insert: added_beads,
                                                 removed_orphans: all_removed_orphans,
                                                 bead_index_mapping: bead_index_mapping,
                                             }
                                         }).await {
                                             Ok(_) => {
                                                 info!(
-                                                    bead_count = beads.len(),
+                                                    bead_count = inserted_count,
                                                     "Batch insert queued for IBD beads"
                                                 );
                                             },

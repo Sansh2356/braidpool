@@ -119,8 +119,8 @@ impl CoinbaseConfig {
             Network::Bitcoin => "bc1qpa77defz30uavu8lxef98q95rae6m7t8au9vp7".to_string(),
             Network::Testnet(_) => "tb1qpa77defz30uavu8lxef98q95rae6m7t8au9vp7".to_string(),
             Network::Signet => "tb1qpa77defz30uavu8lxef98q95rae6m7t8au9vp7".to_string(),
-            Network::Regtest => "bcrt1qpa77defz30uavu8lxef98q95rae6m7t8au9vp7".to_string(),
-            Network::CPUNet => "tc1qu3cdq9unyhdc3d2hw8mvpfgnnhvp6ucckkl6ft".to_string(),
+            Network::Regtest => "bcrt1q5xdsxg24xcpzd6tpmqr62k5pt8eh8zvf7jagyn".to_string(),
+            // Network::CPUNet => "tc1qu3cdq9unyhdc3d2hw8mvpfgnnhvp6ucckkl6ft".to_string(),
             _ => "tb1qpa77defz30uavu8lxef98q95rae6m7t8au9vp7".to_string(),
         };
 
@@ -161,7 +161,7 @@ mod test {
                 ],
             },
             bitcoin_config: BitcoinConfig {
-                network: Network::CPUNet,
+                network: Network::Regtest,
                 username: "username".to_string(),
                 password: "password".to_string(),
                 port: "18443".to_string(),
