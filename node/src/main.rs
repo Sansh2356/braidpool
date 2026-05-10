@@ -965,7 +965,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                 peer_manager.update_score(&peer, 1.0);
                                             }
 
-                                            debug!(beadhash = %curr_beadhash, "Bead added to batch for insertion"); 
+                                            debug!(beadhash = %curr_beadhash, "Bead added to batch for insertion");
                                             non_duplicate_beads.push(bead.to_owned());
                                         }
                                     }
