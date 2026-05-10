@@ -258,10 +258,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // let keypair = identity::Keypair::generate_ed25519();
     //creating a main topic subscribing to the current test topic
     let current_broadcast_topic: floodsub::Topic = floodsub::Topic::new(BRAIDPOOL_TOPIC);
-
+    let keypair_ref = keypair.clone();
     let swarm_builder = libp2p::SwarmBuilder::with_existing_identity(keypair)
         .with_tokio()
-        .with_quic()
+        .with_quic_config(|_| {
+            let mut quic_config = libp2p::quic::Config::new(&keypair_ref);
+            quic_config.max_concurrent_stream_limit = 1;
+            quic_config
+        })
         .with_dns()
         .map_err(|e| {
             std::io::Error::new(
@@ -269,7 +273,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 format!("DNS setup failed: {:?}", e),
             )
         })?;
-    // Note: with_behaviour closure must return behaviour directly (not Result), using expect for clear error message
+    // Note: with_behaviour closure must return behaviour directly (not Result), using expect for clsear error message
     let mut swarm = swarm_builder
         .with_behaviour(|local_key| {
             BraidPoolBehaviour::new(local_key).expect(
@@ -583,7 +587,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         let mut peer_manager = peer_manager_arc.write().await;
                                         peer_manager.penalize_for_invalid_bead(&message.source);
                                     }
-                                } else if let braid::AddBeadStatus::BeadAdded = status {
+                                }
+                                else if let braid::AddBeadStatus::DagAlreadyContainsBead = status{
+                                    warn!("Local braid already contains the received bead !");
+                                }
+                                else if let braid::AddBeadStatus::BeadAdded = status {
                                     //If the current bead's extension has further led to removal of orphan beads then
                                     //We can get the orphan beads that we can persist in DB also
                                     let bead_id = match braid_data
@@ -915,7 +923,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     // Collect orphans for batch insertion
                                     let mut all_removed_orphans = Vec::new();
                                     let mut bead_index_mapping = HashMap::new();
-
+                                    let mut non_duplicate_beads = Vec::new();
                                     for bead in beads.iter() {
                                         let mut braid_data = braid.write().await;
                                         let status = braid_data.extend(&bead);
@@ -927,7 +935,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                 let mut peer_manager = peer_manager_arc.write().await;
                                                 peer_manager.penalize_for_invalid_bead(&peer);
                                             }
-                                        } else if let braid::AddBeadStatus::BeadAdded = status {
+                                        }
+                                        else if let braid::AddBeadStatus::InvalidBead = status{
+                                            warn!("A duplicate bead received during IBD !");
+                                        }
+                                        else if let braid::AddBeadStatus::BeadAdded = status {
                                             // Update bead index mapping for batch insert
                                             bead_index_mapping = braid_data.bead_index_mapping.clone();
 
@@ -953,15 +965,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                 peer_manager.update_score(&peer, 1.0);
                                             }
 
-                                            debug!(beadhash = %curr_beadhash, "Bead added to batch for insertion");
+                                            debug!(beadhash = %curr_beadhash, "Bead added to batch for insertion"); 
+                                            non_duplicate_beads.push(bead.to_owned());
                                         }
                                     }
 
                                     // Perform batch insertion for all successfully added beads
-                                    if !beads.to_vec().is_empty() {
+                                    if !non_duplicate_beads.to_vec().is_empty() {
                                         match db_tx.send(node::db::BraidpoolDBTypes::InsertTupleTypes {
                                             query: node::db::InsertTupleTypes::InsertBeadsBatch {
-                                                beads_to_insert:beads.to_vec(),
+                                                beads_to_insert:non_duplicate_beads.to_vec(),
                                                 removed_orphans: all_removed_orphans,
                                                 bead_index_mapping: bead_index_mapping,
                                             }
