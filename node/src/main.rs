@@ -68,7 +68,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Initialize tracing with colors and module prefixes
     setup_tracing()?;
     //Initializing DB and db command handler
-    let (mut _db_handler, db_tx) = DBHandler::new().await.map_err(|e| {
+    let (mut db_handler, db_tx) = DBHandler::new().await.map_err(|e| {
         std::io::Error::new(
             std::io::ErrorKind::Other,
             format!("Database initialization failed: {:?}", e),
@@ -78,15 +78,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Initializing the braid object with read write lock
     //for supporting concurrent readers and single writer
     let braid: Arc<RwLock<braid::Braid>> = Arc::new(RwLock::new(braid::Braid::new(Vec::from([]))));
-    let db_connection_pool = _db_handler.db_connection_pool.clone();
-    //Reconstructing local braid upon startup
-    let db_connection_pool_ref = _db_handler.db_connection_pool.clone();
     let braid_ref = braid.clone();
+    let connection_pool_ref_fetch_handle = db_handler.db_connection_pool.clone();
+    let connection_pool_ref_shutdown_handle = db_handler.db_connection_pool.clone();
     // FIXME instead we should look 144 blocks back from the bitcoin tip (1 day) and load beads
     // starting from that block as genesis
     let initial_bead_fetch_handle = tokio::spawn(async move {
         let mut guard = braid_ref.write().await;
-        let fetched_beads = fetch_beads_in_batch(db_connection_pool_ref, 1000).await?;
+        let fetched_beads = fetch_beads_in_batch(&connection_pool_ref_fetch_handle, 1000).await?;
         for bead in &fetched_beads {
             let curr_bead_status = guard.extend(&bead);
             info!(
@@ -116,7 +115,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let latest_template_id_for_consumer = latest_template_id.clone();
     //Starting the `query_handler` task
     tokio::spawn(async move {
-        let _res = _db_handler.insert_query_handler().await;
+        let _res = db_handler.insert_query_handler().await;
     });
     //latest available template to be cached for the newest connection until new job is received
     let latest_template = Arc::new(Mutex::new(BlockTemplate::default()));
@@ -1473,9 +1472,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     match shutdown_signal {
         Ok(_) => {
             info!(component = "database", "Closing connection pool");
-            let pool = db_connection_pool.lock().await;
             //Closing all the existing connections to pool and committing from .db-wal to .db
-            pool.close().await;
+            connection_pool_ref_shutdown_handle.close().await;
             info!(component = "database", "Connections closed");
             info!(component = "swarm", "Shutting down network swarm");
             swarm_handle.abort();

@@ -10,11 +10,9 @@ use bitcoin::{
     absolute::MedianTimePast, ecdsa::Signature, BlockHash, BlockTime, BlockVersion, CompactTarget,
     PublicKey, TxMerkleNode, Txid,
 };
-use futures::lock::Mutex;
 use serde_json::json;
 use sqlx::{Pool, Row, Sqlite};
 use std::collections::HashMap;
-use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender};
 #[allow(unused_imports)]
 use tracing::{debug, error, info, trace, warn};
@@ -92,12 +90,12 @@ pub struct DBHandler {
     //Query receiver inherit to handler only
     receiver: Receiver<BraidpoolDBTypes>,
     //Shared across tasks for accessing DB after contention using `Mutex`
-    pub db_connection_pool: Arc<Mutex<Pool<Sqlite>>>,
+    pub db_connection_pool: Pool<Sqlite>,
 }
 impl DBHandler {
     pub async fn new() -> Result<(Self, Sender<BraidpoolDBTypes>), DBErrors> {
         debug!("Initializing schema for persistent database");
-        let connection = match init_db().await {
+        let db_connection_pool = match init_db().await {
             Ok(conn) => conn,
             Err(error) => {
                 error!(error = ?error, "Failed to initialize database connection");
@@ -110,7 +108,7 @@ impl DBHandler {
         Ok((
             Self {
                 receiver: db_handler_rx,
-                db_connection_pool: Arc::new(Mutex::new(connection)),
+                db_connection_pool,
             },
             db_handler_tx,
         ))
@@ -125,7 +123,7 @@ impl DBHandler {
         bead_id: &usize,
     ) -> Result<(), DBErrors> {
         trace!("Sequential insertion query received");
-        let mut local_transaction = match self.db_connection_pool.lock().await.begin().await {
+        let mut local_transaction = match self.db_connection_pool.begin().await {
             Ok(local_transaction) => local_transaction,
             Err(err) => {
                 error!("Failed to begin DB transaction: {}", err);
@@ -298,7 +296,7 @@ impl DBHandler {
             "Batch insertion query received"
         );
 
-        let mut local_transaction = match self.db_connection_pool.lock().await.begin().await {
+        let mut local_transaction = match self.db_connection_pool.begin().await {
             Ok(local_transaction) => local_transaction,
             Err(err) => {
                 error!("Failed to begin DB batch transaction: {}", err);
@@ -643,7 +641,7 @@ impl DBHandler {
                 );
                 for original_bead in beads_ref.iter() {
                     let bead = fetch_bead_by_bead_hash(
-                        self.db_connection_pool.clone(),
+                        &self.db_connection_pool,
                         original_bead.block_header.block_hash(),
                     )
                     .await;
@@ -837,13 +835,12 @@ impl DBHandler {
 }
 //Fetching beads in batch
 pub async fn fetch_beads_in_batch(
-    db_pool: Arc<Mutex<Pool<Sqlite>>>,
+    db_pool: &Pool<Sqlite>,
     batch_size: u32,
 ) -> Result<Vec<Bead>, DBErrors> {
     let mut fetched_beads = Vec::new();
-    let conn = db_pool.lock().await.clone();
     let total_rows: u32 = sqlx::query("SELECT COUNT(*) as row_cnt FROM BEAD")
-        .fetch_one(&conn)
+        .fetch_one(db_pool)
         .await
         .map_err(|e| DBErrors::TupleNotFetched {
             error: e.to_string(),
@@ -865,7 +862,7 @@ pub async fn fetch_beads_in_batch(
         let rows = sqlx::query("SELECT * FROM BEAD LIMIT ? OFFSET ?")
             .bind(batch_size)
             .bind(offset)
-            .fetch_all(&conn)
+            .fetch_all(db_pool)
             .await
             .map_err(|e| DBErrors::TupleNotFetched {
                 error: e.to_string(),
@@ -959,7 +956,7 @@ pub async fn fetch_beads_in_batch(
 
             let tx_rows = sqlx::query("SELECT txid as txid FROM Transactions WHERE bead_id = ?")
                 .bind(current_bead_id)
-                .fetch_all(&conn)
+                .fetch_all(db_pool)
                 .await
                 .map_err(|e| DBErrors::TupleNotFetched {
                     error: e.to_string(),
@@ -983,7 +980,7 @@ pub async fn fetch_beads_in_batch(
             let parent_rows =
                 sqlx::query("SELECT parent, timestamp FROM ParentTimestamps WHERE child = ?")
                     .bind(current_bead_id)
-                    .fetch_all(&conn)
+                    .fetch_all(db_pool)
                     .await
                     .map_err(|e| DBErrors::TupleNotFetched {
                         error: e.to_string(),
@@ -995,7 +992,7 @@ pub async fn fetch_beads_in_batch(
 
                 let parent_hash_row = sqlx::query("SELECT hash FROM BEAD WHERE id = ?")
                     .bind(parent_id)
-                    .fetch_one(&conn)
+                    .fetch_one(db_pool)
                     .await
                     .map_err(|e| DBErrors::TupleNotFetched {
                         error: e.to_string(),
@@ -1038,7 +1035,7 @@ pub async fn fetch_beads_in_batch(
 }
 //Fetching single bead
 pub async fn fetch_bead_by_bead_hash(
-    db_connection_arc: Arc<Mutex<Pool<Sqlite>>>,
+    db_connection_arc: &Pool<Sqlite>,
     bead_hash: BlockHash,
 ) -> Result<Option<Bead>, DBErrors> {
     let mut fetched_bead: Bead = Bead::default();
@@ -1140,7 +1137,7 @@ pub async fn fetch_bead_by_bead_hash(
             fetched_bead.uncommitted_metadata.signature = signature;
             Ok(())
         })
-        .fetch_optional(&db_connection_arc.lock().await.clone())
+        .fetch_optional(&*db_connection_arc)
         .await
     {
         Ok(_rows) => {
@@ -1159,7 +1156,7 @@ pub async fn fetch_bead_by_bead_hash(
     let rows =
         match sqlx::query("SELECT  txid as txid, bead_id FROM Transactions WHERE bead_id = ?")
             .bind(bead_id)
-            .fetch_all(&db_connection_arc.lock().await.clone())
+            .fetch_all(&*db_connection_arc)
             .await
         {
             Ok(rows) => rows,
@@ -1173,7 +1170,7 @@ pub async fn fetch_bead_by_bead_hash(
     let parent_timestamp_rows =
         match sqlx::query("SELECT  parent,child,timestamp FROM ParentTimestamps WHERE child = ?")
             .bind(bead_id)
-            .fetch_all(&db_connection_arc.lock().await.clone())
+            .fetch_all(&*db_connection_arc)
             .await
         {
             Ok(rows) => rows,
@@ -1189,7 +1186,7 @@ pub async fn fetch_bead_by_bead_hash(
         //Fetching parent_bead from DB
         let parent_bead_hash_raw_bytes = match sqlx::query("SELECT  hash FROM Bead WHERE id = ?")
             .bind(parent_bead_id)
-            .fetch_one(&db_connection_arc.lock().await.clone())
+            .fetch_one(&*db_connection_arc)
             .await
         {
             Ok(bead_tuple) => bead_tuple.get::<Vec<u8>, _>("hash"),
@@ -1440,12 +1437,10 @@ pub mod test {
                     panic!("An error occurred while committing transaction");
                 }
             };
-            let fetched_test_bead = fetch_bead_by_bead_hash(
-                Arc::new(Mutex::new(test_pool.clone())),
-                bead.block_header.block_hash(),
-            )
-            .await
-            .unwrap();
+            let fetched_test_bead =
+                fetch_bead_by_bead_hash(&test_pool, bead.block_header.block_hash())
+                    .await
+                    .unwrap();
             assert_eq!(
                 fetched_test_bead
                     .unwrap()
@@ -1608,12 +1603,10 @@ pub mod test {
         }
 
         for bead in current_file_braid.beads.iter() {
-            let fetched_test_bead = fetch_bead_by_bead_hash(
-                Arc::new(Mutex::new(test_pool.clone())),
-                bead.block_header.block_hash(),
-            )
-            .await
-            .unwrap();
+            let fetched_test_bead =
+                fetch_bead_by_bead_hash(&test_pool, bead.block_header.block_hash())
+                    .await
+                    .unwrap();
 
             assert!(
                 fetched_test_bead.is_some(),
