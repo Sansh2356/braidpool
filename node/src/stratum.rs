@@ -11,6 +11,7 @@ use num::ToPrimitive;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::UNIX_EPOCH;
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::{
@@ -1119,11 +1120,14 @@ impl Default for DownstreamClient {
 /// * `downstream_connection_mapping` - Thread-safe mapping of downstream
 ///   miner connections, wrapped in `Arc<RwLock<...>>` to allow concurrent reads
 ///   (e.g. RPC, Notifier) while stratum holds a write lock only for add/remove.
+/// * `ibd_complete` - Atomic flag indicating whether IBD (Initial Bead Download) is complete.
+///   Miner connections are only accepted after this flag is set to true.
 #[derive(Debug)]
 pub struct Server {
     stratum_config: StratumServerConfig,
     downstream_connection_mapping: Arc<RwLock<ConnectionMapping>>,
     block_submission_tx: Option<mpsc::UnboundedSender<BlockSubmissionRequest>>,
+    ibd_complete: Arc<AtomicBool>,
 }
 ///Types for the `mining.notify` jobs to be sent to the fellow connected downstream nodes
 /// `SendToAll` broadcasts the most recently received `job` to the downstream nodes .
@@ -1763,6 +1767,7 @@ impl Server {
         server_config: StratumServerConfig,
         connection_mapping_arc: Arc<RwLock<ConnectionMapping>>,
         block_submission_tx: Option<mpsc::UnboundedSender<BlockSubmissionRequest>>,
+        ibd_complete: Arc<AtomicBool>,
     ) -> Self {
         debug!(config = ?server_config, "Initializing stratum server");
 
@@ -1770,6 +1775,7 @@ impl Server {
             stratum_config: server_config,
             downstream_connection_mapping: connection_mapping_arc,
             block_submission_tx,
+            ibd_complete,
         }
     }
     /// Starts and runs the Stratum server, handling incoming miner connections.
@@ -1833,6 +1839,15 @@ impl Server {
                  let self_mining_map = Arc::new(Mutex::new(MiningJobMap::new()));
                  match event{
                      Ok((stream,peer_addr))=>{
+                        // Gate miner connections until IBD is complete
+                         if !self.ibd_complete.load(Ordering::Acquire) {
+                             warn!(
+                                 peer = %peer_addr,
+                                 "Rejecting miner connection - IBD not complete"
+                             );
+                             drop(stream);
+                             continue;
+                         }
                          let (reader, writer) = stream.into_split();
                          //Notification sender to the `Notifier` task
                          let notification_sender = notification_sender.clone();
@@ -2080,8 +2095,13 @@ mod test {
             port: 3353,
             ..Default::default()
         };
-
-        let mut server = Server::new(config.clone(), connection_mapping.clone(), None);
+        let ibd_complete = Arc::new(AtomicBool::new(true));
+        let mut server = Server::new(
+            config.clone(),
+            connection_mapping.clone(),
+            None,
+            ibd_complete,
+        );
 
         let server_task = tokio::spawn(async move {
             let _ = server
@@ -2138,8 +2158,13 @@ mod test {
             port: 3356,
             ..Default::default()
         };
-
-        let mut server = Server::new(config.clone(), connection_mapping.clone(), None);
+        let ibd_complete = Arc::new(AtomicBool::new(true));
+        let mut server = Server::new(
+            config.clone(),
+            connection_mapping.clone(),
+            None,
+            ibd_complete,
+        );
 
         let server_task = tokio::spawn(async move {
             let _ = server
@@ -2181,7 +2206,8 @@ mod test {
         };
 
         let port = config.port;
-        let mut server = Server::new(config, connection_mapping, None);
+        let ibd_complete = Arc::new(AtomicBool::new(true));
+        let mut server = Server::new(config, connection_mapping, None, ibd_complete);
         tokio::spawn(async move {
             let _ = server
                 .run_stratum_service(mining_job_map, notify_tx, swarm_handler_arc)
@@ -2223,7 +2249,8 @@ mod test {
             ..Default::default()
         };
         let port = config.port;
-        let mut server = Server::new(config, connection_mapping, None);
+        let ibd_complete = Arc::new(AtomicBool::new(true));
+        let mut server = Server::new(config, connection_mapping, None, ibd_complete);
         tokio::spawn(async move {
             let _ = server
                 .run_stratum_service(mining_job_map, notify_tx, swarm_handler_arc)
@@ -2258,8 +2285,8 @@ mod test {
             port: 5050,
             ..Default::default()
         };
-
-        let mut server = Server::new(config, connection_mapping.clone(), None);
+        let ibd_complete = Arc::new(AtomicBool::new(true));
+        let mut server = Server::new(config, connection_mapping.clone(), None, ibd_complete);
         let mining_job_map_clone = mining_job_map.clone();
         let notify_tx_clone = notify_tx.clone();
         tokio::spawn(async move {

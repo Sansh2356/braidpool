@@ -41,6 +41,7 @@ use std::collections::HashSet;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 use std::{collections::HashMap, error::Error};
@@ -151,12 +152,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // IBD will be triggered when peer count threshold is reached
     let mut ibd_initiated = false;
+    // Flag to indicate IBD completion - prevents miner connections until synced
+    let ibd_complete = Arc::new(AtomicBool::new(false));
+    let ibd_complete_for_stratum = ibd_complete.clone();
 
     //Initializing stratum server
     let mut stratum_server = Server::new(
         stratum_config,
         connection_mapping.clone(),
         Some(block_submission_tx),
+        ibd_complete_for_stratum,
     );
     //Running the notification service
     tokio::spawn(async move {
@@ -751,19 +756,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             remote_addr = ?remote_addr,
                             "Connection established to peer"
                         );
-                        // Trigger IBD when peer count threshold is reached
+                        // Trigger IBD when peer count threshold is reached and we have synced peers
                         {
                             let  peer_manager = peer_manager_arc.write().await;
-                            if !ibd_initiated && peer_manager.num_connected_peers() >= MIN_PEERS_FOR_IBD {
+                            let has_synced_peers = peer_manager.num_synced_peers() >= MIN_PEERS_FOR_IBD;
+                            if !ibd_initiated && has_synced_peers {
                              info!(
                                  peer_count = peer_manager.num_connected_peers(),
+                                 synced_peers = peer_manager.num_synced_peers(),
                                  threshold = MIN_PEERS_FOR_IBD,
-                                 "Peer threshold reached, initiating IBD"
+                                 "Peer threshold reached with synced peers, initiating IBD"
                              );
                              match swarm_command_sender.send(SwarmCommand::InitiateIBD).await {
                                  Ok(_) => {
                                      ibd_initiated = true;
-                                     info!("IBD trigger sent based on peer count");
+                                     info!("IBD trigger sent based on peer count and sync status");
                                  }
                                  Err(error) => {
                                      error!(error=?error, "Failed to send IBD initiation command");
@@ -1075,6 +1082,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     else{
                                         //IBD completed
                                         let sync_mode = if next_batch_offset > IBD_BATCH_SIZE { "batches" } else { "single-fetch" };
+                                        ibd_complete.store(true, Ordering::Release);
                                         info!(
                                             peer = %peer,
                                             sync_mode = %sync_mode,
@@ -1158,6 +1166,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     if flag{
                                         //No need to proceed further and continue to next event
                                         info!("Peer already synced to tip");
+                                        ibd_complete.store(true, Ordering::Release);
                                         continue;
                                     }
                                     {
@@ -1265,25 +1274,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
              Some(swarm_command) = swarm_command_receiver.recv()=>{
                  match swarm_command{
                      SwarmCommand::InitiateIBD=>{
-                        info!("Initiating IBD after peer discovery and selecting peer with lowest latency score");
-                        //Evicting lowest latency peer id
+                        info!("Initiating IBD after peer discovery and selecting synced peer with lowest latency score");
+                        //Selecting synced peer with best latency
                         let peer_ids = {
                             let peer_manager = peer_manager_arc.read().await;
-                            peer_manager.get_top_k_peers_for_propagation(1)
+                            peer_manager.get_top_k_synced_peers_for_ibd(1)
                         };
                         if peer_ids.len() == 0 {
-                            warn!("No peer available for syncing to take place");
+                            warn!("No synced peer available for IBD; retrying");
                                 tokio::spawn({
                                     let swarm_command_sender = swarm_command_sender.clone();
-                                    //Retrying at fixed interval in case of no sync peers being available
+                                    //Retrying at fixed interval in case of no synced peers being available
                                     async move {
                                         tokio::time::sleep(Duration::from_secs(IBD_RETRY_DELAY)).await;
                                         match swarm_command_sender.send(SwarmCommand::InitiateIBD).await {
                                             Ok(_) => {
-                                                warn!("Retrying IBD when no sync peers are available");
+                                                warn!("Retrying IBD when no synced peer was available");
                                             }
                                             Err(error) => {
-                                                error!(error=?error, "Failed to reinitiate IBD when no sync peer was available");
+                                                error!(error=?error, "Failed to reinitiate IBD when no synced peer was available");
                                             }
                                         }
                                     }
@@ -1291,11 +1300,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         }
                         else{
                             let mut sync_request_sent = false;
-                            for lowest_latency_peer in peer_ids.into_iter(){
+                            for synced_peer in peer_ids.into_iter(){
                                 let (retry_count_tx,retry_count_rx) = tokio::sync::oneshot::channel();
                                 {
                                     let mut peer_manager = peer_manager_arc.write().await;
-                                    peer_manager.handle_get_incoming_bead_retry_count(lowest_latency_peer,retry_count_tx);
+                                    peer_manager.handle_get_incoming_bead_retry_count(synced_peer,retry_count_tx);
                                 }
                                 let retry_cnt = match retry_count_rx.await {
                                     Ok(cnt) => cnt,
@@ -1305,18 +1314,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     }
                                 };
                                 if retry_cnt >= MAX_IBD_RETRIES{
-                                    warn!("Corresponding peer {:?} retries for IBD exceeded selecting next lowest latent peer",lowest_latency_peer);
+                                    warn!("Synced peer {:?} IBD retries exceeded, trying next peer",synced_peer);
                                     continue;
                                 }
                                 else if retry_cnt == 0{
                                     //First time syncing is being done wrt the provided peer
                                     {
                                         let mut peer_manager = peer_manager_arc.write().await;
-                                        peer_manager.reset_ibd_state(&lowest_latency_peer);
+                                        peer_manager.reset_ibd_state(&synced_peer);
                                     }
                                     let sync_start_request:BeadRequest = BeadRequest::GetTips;
-                                    let req_id = swarm.behaviour_mut().bead_sync.send_request(&lowest_latency_peer, sync_start_request);
-                                    peer_manager_arc.write().await.set_ibd_inflight(lowest_latency_peer, req_id);
+                                    let req_id = swarm.behaviour_mut().bead_sync.send_request(&synced_peer, sync_start_request);
+                                    peer_manager_arc.write().await.set_ibd_inflight(synced_peer, req_id);
                                     sync_request_sent = true;
                                     break;
                                 }
@@ -1324,13 +1333,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     //Case of retry is there
                                     {
                                         let mut peer_manager = peer_manager_arc.write().await;
-                                        peer_manager.handle_update_retry_count(lowest_latency_peer);
-                                        peer_manager.reset_ibd_state(&lowest_latency_peer);
+                                        peer_manager.handle_update_retry_count(synced_peer);
+                                        peer_manager.reset_ibd_state(&synced_peer);
                                     }
                                     //Initiating IBD and sending the request to fetch tips and store them in a centralized mapping owned by main_thread .
                                     let sync_start_request:BeadRequest = BeadRequest::GetTips;
-                                    let req_id = swarm.behaviour_mut().bead_sync.send_request(&lowest_latency_peer, sync_start_request);
-                                    peer_manager_arc.write().await.set_ibd_inflight(lowest_latency_peer, req_id);
+                                    let req_id = swarm.behaviour_mut().bead_sync.send_request(&synced_peer, sync_start_request);
+                                    peer_manager_arc.write().await.set_ibd_inflight(synced_peer, req_id);
                                     sync_request_sent = true;
                                     break;
                                 }

@@ -23,6 +23,8 @@ pub struct PeerInfo {
     pub latency: Option<Duration>,
     /// Whether this peer connection was initiated by the remote peer
     pub inbound: bool,
+    /// Whether the peer is synced (has up-to-date blockchain state)
+    pub synced_or_not: bool,
     /// When we last received a message from this peer
     pub last_message_time: Instant,
     /// Score used for peer ranking (higher is better)
@@ -61,6 +63,7 @@ impl PeerInfo {
             peer_id,
             latency: None,
             inbound,
+            synced_or_not: false,
             last_message_time: Instant::now(),
             score: 100.0,
             geo_group: ip.map(|addr| Self::calculate_geo_group(addr)),
@@ -342,6 +345,73 @@ impl PeerManager {
         if let Some(peer) = self.peers.get_mut(peer_id) {
             peer.score += delta;
         }
+    }
+
+    /// Mark a peer as synced (has up-to-date blockchain state)
+    pub fn mark_peer_synced(&mut self, peer_id: &PeerId) {
+        if let Some(peer) = self.peers.get_mut(peer_id) {
+            peer.synced_or_not = true;
+        }
+    }
+
+    /// Get count of synced peers that are currently connected
+    pub fn num_synced_peers(&self) -> usize {
+        self.peers
+            .values()
+            .filter(|info| info.connected && info.synced_or_not)
+            .count()
+    }
+
+    /// Get count of connected peers that are synced
+    pub fn get_synced_peers(&self) -> Vec<PeerId> {
+        self.peers
+            .values()
+            .filter(|info| info.connected && info.synced_or_not)
+            .map(|info| info.peer_id)
+            .collect()
+    }
+
+    /// Get the top k synced peers for IBD with network diversity
+    pub fn get_top_k_synced_peers_for_ibd(&self, k: usize) -> Vec<PeerId> {
+        if k == 0 {
+            return Vec::new();
+        }
+
+        // Create a list of synced connected peers with their info
+        let mut peer_list: Vec<(&PeerId, &PeerInfo)> = self
+            .peers
+            .iter()
+            .filter(|(id, info)| {
+                self.connected_peers.contains(id) && info.connected && info.synced_or_not
+            })
+            .collect();
+
+        // Sort by score (highest first)
+        peer_list.sort_by(|a, b| {
+            b.1.score
+                .partial_cmp(&a.1.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Ensure geographic diversity: pick one per geo_group where possible
+        let mut selected_peers = Vec::new();
+        let mut used_geogroups = std::collections::HashSet::new();
+
+        for (peer_id, info) in peer_list.iter() {
+            if selected_peers.len() >= k {
+                break;
+            }
+            if let Some(geo_group) = &info.geo_group {
+                if !used_geogroups.contains(geo_group) {
+                    selected_peers.push(**peer_id);
+                    used_geogroups.insert(geo_group.clone());
+                }
+            } else {
+                selected_peers.push(**peer_id);
+            }
+        }
+
+        selected_peers
     }
 
     /// Get the top k peers for message propagation with network diversity
