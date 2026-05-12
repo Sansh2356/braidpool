@@ -5,6 +5,16 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
+
+/// Maximum number of orphan beads retained outside of Initial Block Download.
+///
+/// During IBD the orphan buffer is allowed to grow without bound so that a
+/// peer can stream beads in any order while their parents catch up. Once IBD
+/// completes, [`Braid::complete_ibd`] truncates and shrinks the orphan buffer
+/// back to this limit to bound memory and prevent DoS by adversarial peers
+/// flooding orphans with unknown parents.
+pub const ORPHAN_LIMIT: usize = 20;
+
 #[derive(Clone, Debug, Serialize, PartialEq, Deserialize)]
 pub struct Cohort(pub HashSet<usize>);
 #[derive(Debug, Clone)]
@@ -32,6 +42,10 @@ pub struct Braid {
     pub orphan_beads: Vec<Bead>,
     pub genesis_beads: HashSet<usize>,
     pub bead_index_mapping: HashMap<BeadHash, (usize, u32)>,
+    /// While `true`, the orphan buffer is allowed to grow past [`ORPHAN_LIMIT`]
+    /// so that streaming IBD batches with out-of-order parents can be buffered.
+    /// Flipped to `false` by [`Braid::complete_ibd`].
+    pub in_ibd: bool,
 }
 
 impl Braid {
@@ -61,6 +75,7 @@ impl Braid {
             orphan_beads: Vec::new(),
             genesis_beads: bead_indices,
             bead_index_mapping,
+            in_ibd: true,
         }
     }
     pub fn reset(&mut self) {
@@ -71,6 +86,7 @@ impl Braid {
         self.orphan_beads.clear();
         self.genesis_beads.clear();
         self.bead_index_mapping.clear();
+        self.in_ibd = true;
     }
 }
 #[allow(unused)]
@@ -96,6 +112,17 @@ impl Braid {
                 // Try to retrieve the parent
                 //This is not required if a bead exists in DB it would already been extended to local braid as well
                 // Parent not found and can't be retrieved
+                // Outside IBD, refuse to buffer past ORPHAN_LIMIT so a peer cannot
+                // flood us with orphans whose parents will never arrive.
+                if !self.in_ibd && self.orphan_beads.len() >= ORPHAN_LIMIT {
+                    tracing::warn!(
+                        orphan_count = self.orphan_beads.len(),
+                        limit = ORPHAN_LIMIT,
+                        beadhash = ?bead.block_header.block_hash(),
+                        "Orphan buffer full outside IBD; dropping bead with missing parents"
+                    );
+                    return AddBeadStatus::InvalidBead;
+                }
                 self.orphan_beads.push(bead.clone());
                 return AddBeadStatus::ParentsNotYetReceived;
             }
@@ -189,6 +216,25 @@ impl Braid {
         self.process_orphan_beads();
 
         AddBeadStatus::BeadAdded
+    }
+
+    /// Marks Initial Block Download complete and rebounds the orphan buffer.
+    ///
+    /// Drains any orphans whose parents arrived during IBD, drops the excess
+    /// past [`ORPHAN_LIMIT`] if the buffer overshot, and reallocates the
+    /// underlying storage down to that capacity via [`Vec::shrink_to`] so the
+    /// long-lived buffer no longer carries IBD-sized backing memory.
+    pub fn complete_ibd(&mut self) {
+        self.in_ibd = false;
+        if self.orphan_beads.len() > ORPHAN_LIMIT {
+            tracing::warn!(
+                orphan_count = self.orphan_beads.len(),
+                limit = ORPHAN_LIMIT,
+                "Truncating orphan buffer to ORPHAN_LIMIT after IBD"
+            );
+            self.orphan_beads.truncate(ORPHAN_LIMIT);
+        }
+        self.orphan_beads.shrink_to(ORPHAN_LIMIT);
     }
 
     /// Process orphan beads to see if any can now be added to the braid

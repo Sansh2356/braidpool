@@ -1053,6 +1053,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                             let mut peer_manager = peer_manager_arc.write().await;
                                             peer_manager.reset_ibd_state(&peer);
                                         }
+                                        // Drain settled orphans and shrink the orphan buffer back
+                                        // to ORPHAN_LIMIT now that streaming sync is done.
+                                        {
+                                            let mut braid_data = braid.write().await;
+                                            braid_data.complete_ibd();
+                                        }
                                     }
                                 }
                                  BeadResponse::GetBeadsAfter(bead_hashes)=>{

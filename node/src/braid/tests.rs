@@ -30,6 +30,7 @@ pub fn test_extend_functionality() {
         genesis_beads: HashSet::from([0]),
         tips: HashSet::from([0]),
         orphan_beads: Vec::new(),
+        in_ibd: true,
         cohorts: vec![Cohort(HashSet::from([0]))],
         cohort_tips: vec![HashSet::from([0])],
         bead_index_mapping: std::collections::HashMap::from([(
@@ -242,6 +243,7 @@ pub async fn test_orphan_beads_functionality() {
         genesis_beads: HashSet::from([0]),
         tips: HashSet::from([0]),
         orphan_beads: Vec::new(),
+        in_ibd: true,
         cohorts: vec![Cohort(HashSet::from([0]))],
         cohort_tips: vec![HashSet::from([0])],
         bead_index_mapping: std::collections::HashMap::from([(
@@ -320,6 +322,7 @@ pub fn test_genesis1() {
         genesis_beads: HashSet::from([0]),
         tips: HashSet::from([3]),
         orphan_beads: Vec::new(),
+        in_ibd: true,
         cohorts: vec![Cohort(HashSet::from([0]))],
         cohort_tips: vec![HashSet::from([0])],
         bead_index_mapping: std::collections::HashMap::from([
@@ -382,6 +385,7 @@ pub fn test_genesis2() {
         genesis_beads: HashSet::from([0]),
         tips: HashSet::from([3]),
         orphan_beads: Vec::new(),
+        in_ibd: true,
         cohorts: vec![Cohort(HashSet::from([0]))],
         cohort_tips: vec![HashSet::from([0])],
         bead_index_mapping: std::collections::HashMap::from([
@@ -445,6 +449,7 @@ pub fn test_genesis3() {
         genesis_beads: HashSet::from([0, 1, 2]),
         tips: HashSet::from([3]),
         orphan_beads: Vec::new(),
+        in_ibd: true,
         cohorts: vec![Cohort(HashSet::from([0]))],
         cohort_tips: vec![HashSet::from([0])],
         bead_index_mapping: std::collections::HashMap::from([
@@ -548,6 +553,7 @@ pub fn test_tips1() {
         genesis_beads: HashSet::from([0]),
         tips: HashSet::from([3]),
         orphan_beads: Vec::new(),
+        in_ibd: true,
         cohorts: vec![Cohort(HashSet::from([0]))],
         cohort_tips: vec![HashSet::from([0])],
         bead_index_mapping: std::collections::HashMap::from([
@@ -616,6 +622,7 @@ pub fn test_tips2() {
         genesis_beads: HashSet::from([0]),
         tips: HashSet::from([3]),
         orphan_beads: Vec::new(),
+        in_ibd: true,
         cohorts: vec![Cohort(HashSet::from([0]))],
         cohort_tips: vec![HashSet::from([0])],
         bead_index_mapping: std::collections::HashMap::from([
@@ -712,6 +719,7 @@ pub fn test_tips3() {
         genesis_beads: HashSet::from([0, 1, 2]),
         tips: HashSet::from([3, 4, 5]),
         orphan_beads: Vec::new(),
+        in_ibd: true,
         cohorts: vec![Cohort(HashSet::from([0]))],
         cohort_tips: vec![HashSet::from([0])],
         bead_index_mapping: std::collections::HashMap::from([
@@ -818,6 +826,7 @@ pub fn test_reverse() {
         genesis_beads: HashSet::from([0, 1, 2]),
         tips: HashSet::from([3, 4, 5]),
         orphan_beads: Vec::new(),
+        in_ibd: true,
         cohorts: vec![Cohort(HashSet::from([0]))],
         cohort_tips: vec![HashSet::from([0])],
         bead_index_mapping: std::collections::HashMap::from([
@@ -945,6 +954,7 @@ pub fn test_cohorts_parents_1() {
         genesis_beads: HashSet::from([0]),
         tips: HashSet::from([3]),
         orphan_beads: Vec::new(),
+        in_ibd: true,
         cohorts: vec![Cohort(HashSet::from([0]))],
         cohort_tips: vec![HashSet::from([0])],
         bead_index_mapping: std::collections::HashMap::from([
@@ -1092,6 +1102,7 @@ pub fn test_highest_work_path_1() {
         genesis_beads: HashSet::from([0]),
         tips: HashSet::from([3]),
         orphan_beads: Vec::new(),
+        in_ibd: true,
         cohorts: vec![Cohort(HashSet::from([0]))],
         cohort_tips: vec![HashSet::from([0])],
         bead_index_mapping: std::collections::HashMap::from([
@@ -1170,6 +1181,7 @@ pub fn test_diamond_path_highest_work() {
         genesis_beads: HashSet::from([0]),
         tips: HashSet::from([3]),
         orphan_beads: Vec::new(),
+        in_ibd: true,
         cohorts: vec![Cohort(HashSet::from([0]))],
         cohort_tips: vec![HashSet::from([0])],
         bead_index_mapping: std::collections::HashMap::from([
@@ -1543,6 +1555,7 @@ async fn test_extend_function() {
             cohorts: vec![Cohort(genesis_set.clone())],
             cohort_tips: vec![genesis_set.clone()],
             orphan_beads: Vec::new(),
+            in_ibd: true,
             genesis_beads: genesis_set,
             bead_index_mapping,
         };
@@ -1633,6 +1646,7 @@ fn test_get_beads_after() {
         cohorts: vec![Cohort(genesis_set.clone())],
         cohort_tips: vec![genesis_set.clone()],
         orphan_beads: Vec::new(),
+        in_ibd: true,
         genesis_beads: genesis_set,
         bead_index_mapping,
     };
@@ -1739,6 +1753,7 @@ fn test_get_beads_after_diamond_structure() {
         cohorts: vec![Cohort(genesis_set.clone())],
         cohort_tips: vec![genesis_set.clone()],
         orphan_beads: Vec::new(),
+        in_ibd: true,
         genesis_beads: genesis_set,
         bead_index_mapping,
     };
@@ -1839,6 +1854,7 @@ fn test_get_beads_after_complex_braid() {
         cohorts: vec![Cohort(genesis_set.clone())],
         cohort_tips: vec![genesis_set.clone()],
         orphan_beads: Vec::new(),
+        in_ibd: true,
         genesis_beads: genesis_set,
         bead_index_mapping,
     };
@@ -1923,6 +1939,7 @@ fn test_get_beads_after_edge_cases() {
         cohorts: vec![Cohort(genesis_set.clone())],
         cohort_tips: vec![genesis_set.clone()],
         orphan_beads: Vec::new(),
+        in_ibd: true,
         genesis_beads: genesis_set,
         bead_index_mapping,
     };
@@ -2022,6 +2039,7 @@ fn test_get_beads_after_multiple_tips() {
         cohorts: vec![Cohort(genesis_set.clone())],
         cohort_tips: vec![genesis_set.clone()],
         orphan_beads: Vec::new(),
+        in_ibd: true,
         genesis_beads: genesis_set,
         bead_index_mapping,
     };
