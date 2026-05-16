@@ -12,6 +12,9 @@ pub const MAX_IBD_RETRIES: u64 = 10;
 pub const MIN_PEERS_FOR_IBD: usize = 1;
 /// Duration to wait before retrying IBD if no peers are available or all retries exhausted
 pub const IBD_RETRY_DELAY: u64 = 20;
+/// Maximum number of bead hashes a peer is allowed to advertise in a single
+/// `GetBeadsAfter` response thus limiting the batch size during IBD.
+pub const IBD_HASH_PAGE_MAX: usize = 5_000;
 /// Information about a peer in the network
 #[derive(Debug, Clone)]
 pub struct PeerInfo {
@@ -133,9 +136,11 @@ impl PeerManager {
         }
     }
 
+    /// Store a new page of IBD bead hashes for `peer_id` and resetting the batch_size to initial.
     pub fn handle_update_incoming(&mut self, peer_id: PeerId, data: Vec<BeadHash>) {
         if let Some(peer_info) = self.peers.get_mut(&peer_id) {
             peer_info.ibd_bead_queue = data;
+            peer_info.ibd_batch_offset = IBD_BATCH_SIZE;
         } else {
             tracing::error!("PeerInfo not found while updating incoming beads");
         }
