@@ -826,7 +826,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                          // Re-initiate IBD if disconnected peer was our sync target
                          if was_ibd_target {
-                             warn!(peer = %peer_id, "Sync peer disconnected mid-IBD; reinitiating");
+                             warn!(peer = %peer_id, "Sync peer disconnected mid-IBD, reinitiating");
                              match swarm_command_sender.send(SwarmCommand::InitiateIBD).await {
                                  Ok(_) => warn!("Reinitiating IBD after sync peer disconnect"),
                                  Err(error) => error!(error = ?error, "Failed to reinitiate IBD after sync peer disconnect"),
@@ -981,6 +981,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     let mut non_duplicate_beads = Vec::new();
                                     let mut invalid_count: usize = 0;
                                     let mut added_count: usize = 0;
+                                    // Returning updated bead mapping upon insertion of each `Bead` and if orphans removed from the orphan_set
                                     let bead_index_mapping = {
                                         let mut braid_data = braid.write().await;
                                         for bead in beads.iter() {
@@ -1009,7 +1010,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                     non_duplicate_beads.push(bead.to_owned());
                                                 }
                                                 braid::AddBeadStatus::ParentsNotYetReceived => {
-                                                    // bead is now queued inside Braid::orphan_beads
+                                                    warn!("Received an orphan bead during IBD.");
                                                 }
                                             }
                                         }
@@ -1020,10 +1021,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         }
                                     };
 
-                                    // Apply accumulated peer_manager updates outside the braid lock.
-                                    // penalize_for_invalid_bead doubles score_penalty_multiplier per
-                                    // call, so it is not batchable; update_score is additive, so the
-                                    // added beads collapse to a single call with delta = added_count.
+                                    // On the basis of invalid beads penalize the corresponding peer's score
+                                    //  otherwise updates/increase the score on successful addition.
                                     if invalid_count > 0 || added_count > 0 {
                                         let mut peer_manager = peer_manager_arc.write().await;
                                         for _ in 0..invalid_count {
@@ -1058,12 +1057,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                             }
                                         }
                                     }
-                                    // Preparing next batch request to be sent to the sync node
-                                    let next_batch_offset = peer_manager_arc
+                                    // Preparing next batch request to be sent to the sync node.
+                                    let next_batch_offset = match peer_manager_arc
                                         .write()
                                         .await
-                                        .next_batch_offset(peer, IBD_BATCH_SIZE);
-                                    debug!(next_offset = ?next_batch_offset, "Newer offset for batch request received");
+                                        .next_batch_offset(peer, IBD_BATCH_SIZE)
+                                    {
+                                        Some(offset) => offset,
+                                        None => {
+                                            error!(
+                                                peer = %peer,
+                                                "next_batch_offset for unknown peer."
+                                            );
+                                            continue;
+                                        }
+                                    };
+                                    debug!(next_offset = %next_batch_offset, "Newer offset for batch request received");
                                     if next_batch_offset < pruned_beads.len() && ((next_batch_offset+IBD_BATCH_SIZE)< pruned_beads.len()){
                                         let batch_start = next_batch_offset - IBD_BATCH_SIZE;
                                         let page_batch_num = next_batch_offset / IBD_BATCH_SIZE;
@@ -1074,7 +1083,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                             page_total_batches = %page_total_batches,
                                             page_size = %pruned_beads.len(),
                                             range = %format!("{}..{}", batch_start, next_batch_offset),
-                                            "IBD page batch {}/{} fetched (within current GetBeadsAfter page)",
+                                            "IBD page batch {}/{} fetched.",
                                             page_batch_num,
                                             page_total_batches
                                         );
@@ -1088,13 +1097,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                             offset = %next_batch_offset,
                                             remaining = %remaining,
                                             page_size = %pruned_beads.len(),
-                                            "IBD final batch of current page ({} beads remaining in page; more pages may follow)",
+                                            "IBD final batch of current page with beads - {}",
                                             remaining
                                         );
                                         let req_id = swarm.behaviour_mut().request_beads(peer, &pruned_beads[next_batch_offset..].to_vec());
                                         peer_manager_arc.write().await.set_ibd_inflight(peer, req_id);
 
                                     }
+                                    // This is the condition for requesting the next batch of bead-hashes as current bead offset
+                                    // exceeds the required beads and we can move on to the next offset for the next set of beadhashes.
                                     else if pruned_beads.len() >= IBD_HASH_PAGE_MAX {
                                         // Current page batches have been added to braid and next page
                                         // to be visited .
@@ -1109,16 +1120,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         info!(
                                             peer = %peer,
                                             tip_count = current_tip_hashes.len(),
-                                            "IBD page drained at cap; requesting next page with advanced tips"
+                                            "IBD page processed, requesting next page."
                                         );
                                         let next_page_request = BeadRequest::GetBeadsAfter(BeadHashes(current_tip_hashes.clone()));
                                         let req_id = swarm.behaviour_mut().bead_sync.send_request(&peer, next_page_request);
                                         let mut peer_manager = peer_manager_arc.write().await;
-                                        peer_manager.handle_update_ibd_peer_tips(peer, current_tip_hashes);
                                         peer_manager.set_ibd_inflight(peer, req_id);
                                     }
                                     else{
-                                        //IBD completed: last page was short, so the server has nothing more.
+                                        //IBD completed as the last page of the beads will be pruned lesser than page maximum size containing
+                                        // bead-hashes which can be requested and the last chunk for the given page has already been processed.
                                         let sync_mode = if next_batch_offset > IBD_BATCH_SIZE { "batches" } else { "single-fetch" };
                                         ibd_complete.store(true, Ordering::Release);
                                         info!(
@@ -1134,14 +1145,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     }
                                 }
                                  BeadResponse::GetBeadsAfter(bead_hashes)=>{
-                                    // Empty page = server has nothing after our current tips: IBD done.
-                                    if bead_hashes.0.is_empty() {
-                                        info!(peer = %peer, "IBD complete: peer returned empty GetBeadsAfter (we are caught up)");
-                                        ibd_complete.store(true, Ordering::Release);
-                                        let mut peer_manager = peer_manager_arc.write().await;
-                                        peer_manager.reset_ibd_state(&peer);
-                                        continue;
-                                    }
                                    // Potential malicious peer sending us more than requested size during beadhash request
                                     if bead_hashes.0.len() > IBD_HASH_PAGE_MAX {
                                         warn!(
@@ -1173,7 +1176,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                             continue;
                                         }
                                     };
-                                    //Pruning the hashes wrt cached `Tips`
+                                    //Pruning the hashes wrt cached `Tips`that will limit the duplication of beads
+                                    // and infinite looping in case of IBD, if the number of beads exceeds the `IBD_HASH_PAGE_MAX`.
                                     let mut found_tips = HashSet::new();
                                     let mut pruned = Vec::new();
                                     let tips_set: HashSet<_> = received_tips.into_iter().collect();
@@ -1437,11 +1441,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         };
                         let mut braid_data = braid.write().await;
                         let tips_index = &braid_data.tips;
-                        // Collect (parent_hash, parent_timestamp) pairs, then sort by hash so the
-                        // parallel `parents` (encoded via hashset_to_vec_deterministic at
-                        // committed_metadata.rs:109, sorted by hash) and `parent_bead_timestamps`
-                        // (encoded in Vec order at committed_metadata.rs:110) are aligned. Without
-                        // this sort, HashSet iteration order made the bead's hash non-deterministic.
+                        // Sorting in order to achieve deterministic matching .
                         let mut parent_pairs: Vec<(BlockHash, _)> = Vec::with_capacity(tips_index.len());
                         for tip_bead in tips_index {
                             let current_tip_bead = match braid_data.beads.get(*tip_bead) {
