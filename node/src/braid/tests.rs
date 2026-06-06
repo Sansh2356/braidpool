@@ -36,7 +36,7 @@ pub fn test_extend_functionality() {
         cohort_tips: vec![HashSet::from([0])],
         bead_index_mapping: std::collections::HashMap::from([(
             test_bead_0.block_header.block_hash(),
-            0,
+            (0, 0),
         )]),
     };
     assert_eq!(
@@ -249,7 +249,7 @@ pub fn test_orphan_beads_functinality() {
         cohort_tips: vec![HashSet::from([0])],
         bead_index_mapping: std::collections::HashMap::from([(
             test_bead_0.block_header.block_hash(),
-            0,
+            (0, 0),
         )]),
     };
     assert_eq!(
@@ -327,10 +327,10 @@ pub fn test_genesis1() {
         cohorts: vec![Cohort(HashSet::from([0]))],
         cohort_tips: vec![HashSet::from([0])],
         bead_index_mapping: std::collections::HashMap::from([
-            (test_bead_0.block_header.block_hash(), 0),
-            (test_bead_1.block_header.block_hash(), 1),
-            (test_bead_2.block_header.block_hash(), 2),
-            (test_bead_3.block_header.block_hash(), 3),
+            (test_bead_0.block_header.block_hash(), (0, 0)),
+            (test_bead_1.block_header.block_hash(), (1, 0)),
+            (test_bead_2.block_header.block_hash(), (2, 0)),
+            (test_bead_3.block_header.block_hash(), (3, 0)),
         ]),
     };
 
@@ -377,10 +377,10 @@ pub fn test_genesis2() {
         cohorts: vec![Cohort(HashSet::from([0]))],
         cohort_tips: vec![HashSet::from([0])],
         bead_index_mapping: std::collections::HashMap::from([
-            (test_bead_0.block_header.block_hash(), 0),
-            (test_bead_1.block_header.block_hash(), 1),
-            (test_bead_2.block_header.block_hash(), 2),
-            (test_bead_3.block_header.block_hash(), 3),
+            (test_bead_0.block_header.block_hash(), (0, 0)),
+            (test_bead_1.block_header.block_hash(), (1, 0)),
+            (test_bead_2.block_header.block_hash(), (2, 0)),
+            (test_bead_3.block_header.block_hash(), (3, 0)),
         ]),
     };
     //mapping of the indices with set of indices representing its parents
@@ -429,11 +429,11 @@ pub fn test_genesis3() {
         cohorts: vec![Cohort(HashSet::from([0]))],
         cohort_tips: vec![HashSet::from([0])],
         bead_index_mapping: std::collections::HashMap::from([
-            (test_bead_0.block_header.block_hash(), 0),
-            (test_bead_1.block_header.block_hash(), 1),
-            (test_bead_2.block_header.block_hash(), 2),
-            (test_bead_3.block_header.block_hash(), 3),
-            (test_bead_4.block_header.block_hash(), 4),
+            (test_bead_0.block_header.block_hash(), (0, 0)),
+            (test_bead_1.block_header.block_hash(), (1, 0)),
+            (test_bead_2.block_header.block_hash(), (2, 0)),
+            (test_bead_3.block_header.block_hash(), (3, 0)),
+            (test_bead_4.block_header.block_hash(), (4, 0)),
         ]),
     };
     //mapping of the indices with set of indices representing its parents
@@ -517,10 +517,10 @@ pub fn test_tips1() {
         cohorts: vec![Cohort(HashSet::from([0]))],
         cohort_tips: vec![HashSet::from([0])],
         bead_index_mapping: std::collections::HashMap::from([
-            (test_bead_0.block_header.block_hash(), 0),
-            (test_bead_1.block_header.block_hash(), 1),
-            (test_bead_2.block_header.block_hash(), 2),
-            (test_bead_3.block_header.block_hash(), 3),
+            (test_bead_0.block_header.block_hash(), (0, 0)),
+            (test_bead_1.block_header.block_hash(), (1, 0)),
+            (test_bead_2.block_header.block_hash(), (2, 0)),
+            (test_bead_3.block_header.block_hash(), (3, 0)),
         ]),
     };
 
@@ -573,10 +573,10 @@ pub fn test_tips2() {
         cohorts: vec![Cohort(HashSet::from([0]))],
         cohort_tips: vec![HashSet::from([0])],
         bead_index_mapping: std::collections::HashMap::from([
-            (test_bead_0.block_header.block_hash(), 0),
-            (test_bead_1.block_header.block_hash(), 1),
-            (test_bead_2.block_header.block_hash(), 2),
-            (test_bead_3.block_header.block_hash(), 3),
+            (test_bead_0.block_header.block_hash(), (0, 0)),
+            (test_bead_1.block_header.block_hash(), (1, 0)),
+            (test_bead_2.block_header.block_hash(), (2, 0)),
+            (test_bead_3.block_header.block_hash(), (3, 0)),
         ]),
     };
 
@@ -657,12 +657,12 @@ pub fn test_tips3() {
         cohorts: vec![Cohort(HashSet::from([0]))],
         cohort_tips: vec![HashSet::from([0])],
         bead_index_mapping: std::collections::HashMap::from([
-            (test_bead_0.block_header.block_hash(), 0),
-            (test_bead_1.block_header.block_hash(), 1),
-            (test_bead_2.block_header.block_hash(), 2),
-            (test_bead_3.block_header.block_hash(), 3),
-            (test_bead_4.block_header.block_hash(), 4),
-            (test_bead_5.block_header.block_hash(), 5),
+            (test_bead_0.block_header.block_hash(), (0, 0)),
+            (test_bead_1.block_header.block_hash(), (1, 0)),
+            (test_bead_2.block_header.block_hash(), (2, 0)),
+            (test_bead_3.block_header.block_hash(), (3, 0)),
+            (test_bead_4.block_header.block_hash(), (4, 0)),
+            (test_bead_5.block_header.block_hash(), (5, 0)),
         ]),
     };
     //mapping of the indices with set of indices representing its parents
@@ -745,12 +745,12 @@ pub fn test_reverse() {
         cohorts: vec![Cohort(HashSet::from([0]))],
         cohort_tips: vec![HashSet::from([0])],
         bead_index_mapping: std::collections::HashMap::from([
-            (test_bead_0.block_header.block_hash(), 0),
-            (test_bead_1.block_header.block_hash(), 1),
-            (test_bead_2.block_header.block_hash(), 2),
-            (test_bead_3.block_header.block_hash(), 3),
-            (test_bead_4.block_header.block_hash(), 4),
-            (test_bead_5.block_header.block_hash(), 5),
+            (test_bead_0.block_header.block_hash(), (0, 0)),
+            (test_bead_1.block_header.block_hash(), (1, 0)),
+            (test_bead_2.block_header.block_hash(), (2, 0)),
+            (test_bead_3.block_header.block_hash(), (3, 0)),
+            (test_bead_4.block_header.block_hash(), (4, 0)),
+            (test_bead_5.block_header.block_hash(), (5, 0)),
         ]),
     };
     //mapping of the indices with set of indices representing its parents
@@ -855,10 +855,10 @@ pub fn test_cohorts_parents_1() {
         cohorts: vec![Cohort(HashSet::from([0]))],
         cohort_tips: vec![HashSet::from([0])],
         bead_index_mapping: std::collections::HashMap::from([
-            (test_bead_0.block_header.block_hash(), 0),
-            (test_bead_1.block_header.block_hash(), 1),
-            (test_bead_2.block_header.block_hash(), 2),
-            (test_bead_3.block_header.block_hash(), 3),
+            (test_bead_0.block_header.block_hash(), (0, 0)),
+            (test_bead_1.block_header.block_hash(), (1, 0)),
+            (test_bead_2.block_header.block_hash(), (2, 0)),
+            (test_bead_3.block_header.block_hash(), (3, 0)),
         ]),
     };
 
@@ -990,10 +990,10 @@ pub fn test_highest_work_path_1() {
         cohorts: vec![Cohort(HashSet::from([0]))],
         cohort_tips: vec![HashSet::from([0])],
         bead_index_mapping: std::collections::HashMap::from([
-            (test_bead_0.block_header.block_hash(), 0),
-            (test_bead_1.block_header.block_hash(), 1),
-            (test_bead_2.block_header.block_hash(), 2),
-            (test_bead_3.block_header.block_hash(), 3),
+            (test_bead_0.block_header.block_hash(), (0, 0)),
+            (test_bead_1.block_header.block_hash(), (1, 0)),
+            (test_bead_2.block_header.block_hash(), (2, 0)),
+            (test_bead_3.block_header.block_hash(), (3, 0)),
         ]),
     };
 
@@ -1057,11 +1057,11 @@ pub fn test_diamond_path_highest_work() {
         cohorts: vec![Cohort(HashSet::from([0]))],
         cohort_tips: vec![HashSet::from([0])],
         bead_index_mapping: std::collections::HashMap::from([
-            (test_bead_0.block_header.block_hash(), 0),
-            (test_bead_1.block_header.block_hash(), 1),
-            (test_bead_2.block_header.block_hash(), 2),
-            (test_bead_3.block_header.block_hash(), 3),
-            (test_bead_4.block_header.block_hash(), 4),
+            (test_bead_0.block_header.block_hash(), (0, 0)),
+            (test_bead_1.block_header.block_hash(), (1, 0)),
+            (test_bead_2.block_header.block_hash(), (2, 0)),
+            (test_bead_3.block_header.block_hash(), (3, 0)),
+            (test_bead_4.block_header.block_hash(), (4, 0)),
         ]),
     };
     //mapping of the indices with set of indices representing its parents
@@ -1400,7 +1400,7 @@ fn test_extend_function() {
             if let Some(bead) = index_to_bead.get(&idx) {
                 genesis_beads.push(bead.clone());
                 genesis_set.insert(idx);
-                bead_index_mapping.insert(bead.block_header.block_hash(), idx);
+                bead_index_mapping.insert(bead.block_header.block_hash(), (idx, 0));
             }
         }
 
@@ -1490,7 +1490,7 @@ fn test_get_beads_after() {
     // Create braid with genesis
     let genesis_set = HashSet::from([0]);
     let mut bead_index_mapping = HashMap::new();
-    bead_index_mapping.insert(beads[0].block_header.block_hash(), 0);
+    bead_index_mapping.insert(beads[0].block_header.block_hash(), (0, 0));
 
     let mut test_braid = Braid {
         beads: vec![beads[0].clone()],
@@ -1593,7 +1593,7 @@ fn test_get_beads_after_diamond_structure() {
     // Create braid with genesis
     let genesis_set = HashSet::from([0]);
     let mut bead_index_mapping = HashMap::new();
-    bead_index_mapping.insert(beads[0].block_header.block_hash(), 0);
+    bead_index_mapping.insert(beads[0].block_header.block_hash(), (0, 0));
 
     let mut test_braid = Braid {
         beads: vec![beads[0].clone()],
@@ -1690,7 +1690,7 @@ fn test_get_beads_after_complex_braid() {
     // Create braid with genesis
     let genesis_set = HashSet::from([0]);
     let mut bead_index_mapping = HashMap::new();
-    bead_index_mapping.insert(beads[0].block_header.block_hash(), 0);
+    bead_index_mapping.insert(beads[0].block_header.block_hash(), (0, 0));
 
     let mut test_braid = Braid {
         beads: vec![beads[0].clone()],
@@ -1771,7 +1771,7 @@ fn test_get_beads_after_edge_cases() {
 
     let genesis_set = HashSet::from([0]);
     let mut bead_index_mapping = HashMap::new();
-    bead_index_mapping.insert(beads[0].block_header.block_hash(), 0);
+    bead_index_mapping.insert(beads[0].block_header.block_hash(), (0, 0));
 
     let mut test_braid = Braid {
         beads: vec![beads[0].clone()],
@@ -1867,7 +1867,7 @@ fn test_get_beads_after_multiple_tips() {
     // Create and build braid
     let genesis_set = HashSet::from([0]);
     let mut bead_index_mapping = HashMap::new();
-    bead_index_mapping.insert(beads[0].block_header.block_hash(), 0);
+    bead_index_mapping.insert(beads[0].block_header.block_hash(), (0, 0));
 
     let mut test_braid = Braid {
         beads: vec![beads[0].clone()],

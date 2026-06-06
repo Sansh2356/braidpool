@@ -669,7 +669,7 @@ impl RpcServer for RpcServerImpl {
         let braid_data = self.braid_arc.read().await;
 
         let parent_index = match braid_data.bead_index_mapping.get(&parent_hash) {
-            Some(index) => *index,
+            Some(&(index, _)) => index,
             None => return Err(ErrorObjectOwned::owned(3, "Bead not found", None::<()>)),
         };
 
@@ -679,7 +679,7 @@ impl RpcServer for RpcServerImpl {
                 .committed_metadata
                 .parents
                 .iter()
-                .filter_map(|p_hash| braid_data.bead_index_mapping.get(p_hash).copied())
+                .filter_map(|p_hash| braid_data.bead_index_mapping.get(p_hash).map(|&(i, _)| i))
                 .collect();
             parents_map.insert(index, parent_indices);
         }
@@ -715,7 +715,7 @@ impl RpcServer for RpcServerImpl {
                 .committed_metadata
                 .parents
                 .iter()
-                .filter_map(|p_hash| braid_data.bead_index_mapping.get(p_hash).copied())
+                .filter_map(|p_hash| braid_data.bead_index_mapping.get(p_hash).map(|&(i, _)| i))
                 .collect();
             parents_map.insert(index, parent_indices);
         }

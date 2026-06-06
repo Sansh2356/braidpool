@@ -1,5 +1,5 @@
 //These implementations must be defined under lib.rs as they are required for intergration tests
-use crate::{db::db_handlers::prepare_bead_tuple_data, rpc_server::DashboardEvents};
+use crate::rpc_server::DashboardEvents;
 use bitcoin::{
     consensus::encode::deserialize, ecdsa::Signature, pow::CompactTargetExt, BlockHash,
     CompactTarget, EcdsaSighashType, Txid,
@@ -366,7 +366,7 @@ impl SwarmHandler {
         };
         let status = braid_data.extend(&weak_share);
         match status {
-            AddBeadStatus::BeadAdded { .. } => {
+            AddBeadStatus::BeadAdded { promoted_orphans } => {
                 let new_tips: Vec<_> = braid_data.tips.iter().map(|&idx| idx).collect();
                 let bead_hash = weak_share.block_header.block_hash();
                 info!(
@@ -375,22 +375,15 @@ impl SwarmHandler {
                     "Braid extended successfully"
                 );
                 //Considering the index of the beads in braid will be same as the (insertion ids-1)
-                let bead_id = braid_data.bead_index_mapping.get(&bead_hash).unwrap();
-                let (txs_json, relative_json, parent_timestamp_json) = prepare_bead_tuple_data(
-                    &braid_data.beads,
-                    &braid_data.bead_index_mapping,
-                    &weak_share,
-                )
-                .unwrap();
+                let bead_id = braid_data.bead_index_mapping.get(&bead_hash).unwrap().0;
                 let _db_insertion_command = match self
                     .db_command_sender
                     .send(BraidpoolDBTypes::InsertTupleTypes {
                         query: db::InsertTupleTypes::InsertBeadSequentially {
                             bead_to_insert: weak_share.clone(),
-                            txs_json: txs_json,
-                            relative_json: relative_json,
-                            parent_timestamp_json: parent_timestamp_json,
-                            bead_id: *bead_id,
+                            removed_orphans: promoted_orphans,
+                            bead_index_mapping: braid_data.bead_index_mapping.clone(),
+                            bead_id,
                         },
                     })
                     .await
