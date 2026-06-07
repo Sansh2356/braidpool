@@ -45,7 +45,6 @@ pub mod committed_metadata;
 pub mod config;
 pub mod db;
 pub mod error;
-pub mod ibd_manager;
 pub mod ipc;
 pub mod peer_manager;
 pub mod rpc_server;
@@ -409,7 +408,7 @@ impl SwarmHandler {
                         debug!("Passing self mined bead to the dashboard notifier");
                     }
                     Err(error) => {
-                        error!("An error occurred while sending dashboard notification - {error}");
+                        debug!(error = %error, "No dashboard subscribers for new-bead notification; skipping");
                     }
                 }
                 //After validation of the candidate block constructed by the downstream node sending it to swarm for further propogation

@@ -3,6 +3,7 @@ use crate::braid::{AddBeadStatus, Braid};
 use crate::db::{BraidpoolDBTypes, InsertTupleTypes};
 use crate::utils::BeadHash;
 use std::collections::HashMap;
+use tracing::{debug, warn};
 
 /// Everything the adapter needs after extending the braid with a batch of
 /// downloaded beads: what to persist, and how to score the sync peer.
@@ -62,13 +63,25 @@ pub fn ingest_beads(braid: &mut Braid, beads: &[Bead]) -> IngestOutcome {
         match braid.extend(bead) {
             AddBeadStatus::BeadAdded { promoted_orphans } => {
                 outcome.added += 1;
+                debug!(beadhash = %bead.block_header.block_hash(), "Bead added to batch for insertion");
+                if !promoted_orphans.is_empty() {
+                    debug!(
+                        count = promoted_orphans.len(),
+                        "Orphan beads removed from the orphan set upon extension of current bead"
+                    );
+                }
                 outcome.beads_to_persist.push(bead.clone());
                 outcome.promoted_orphans.extend(promoted_orphans);
             }
             AddBeadStatus::InvalidBead => outcome.invalid += 1,
             // Already in the DAG, or parents not yet present (a later bead in
             // this or a future batch may promote it). Nothing to persist now.
-            AddBeadStatus::DagAlreadyContainsBead | AddBeadStatus::ParentsNotYetReceived => {}
+            AddBeadStatus::DagAlreadyContainsBead => {
+                warn!("A duplicate bead received during IBD !");
+            }
+            AddBeadStatus::ParentsNotYetReceived => {
+                warn!("Received an orphan bead during IBD.");
+            }
         }
     }
     if outcome.added > 0 {

@@ -152,6 +152,19 @@ impl PeerManager {
             peer.score += delta;
         }
     }
+    pub fn select_sync_peer(&self, exclude: &[PeerId]) -> Option<PeerId> {
+        self.peers
+            .iter()
+            .filter(|(id, info)| {
+                info.connected && self.connected_peers.contains(id) && !exclude.contains(id)
+            })
+            .max_by(|a, b| {
+                a.1.score
+                    .partial_cmp(&b.1.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(id, _)| *id)
+    }
 
     /// Get the top k peers for message propagation with network diversity
     pub fn get_top_k_peers_for_propagation(&self, k: usize) -> Vec<PeerId> {
