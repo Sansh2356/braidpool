@@ -19,7 +19,7 @@ use tracing::{debug, error, info, trace, warn};
 pub const DB_CHANNEL_CAPACITY: usize = 1024;
 /// Maximum number of beads (including orphans) to insert in a single bulk query to limit the memory consumption
 pub const BATCH_INSERT_THRESHOLD: usize = 500;
-//Sequential insertion query
+#[cfg(test)]
 const INSERT_QUERY: &'static str = "
 INSERT INTO bead (
     id, hash, nVersion, hashPrevBlock, hashMerkleRoot, nTime,
@@ -113,121 +113,6 @@ impl DBHandler {
             db_handler_tx,
         ))
     }
-    //Insert single bead either during fallback of batch insertions or sequential insertions
-    async fn insert_bead(
-        &self,
-        bead: Bead,
-        txs_json: String,
-        relative_json: String,
-        parent_timestamp_json: String,
-        bead_id: &usize,
-    ) -> Result<(), DBErrors> {
-        trace!("Sequential insertion query received");
-        let mut local_transaction = match self.db_connection_pool.begin().await {
-            Ok(local_transaction) => local_transaction,
-            Err(err) => {
-                error!("Failed to begin DB transaction: {}", err);
-                return Err(DBErrors::ConnectionToSQlitePoolFailed {
-                    error: err.to_string(),
-                });
-            }
-        };
-        //Additional helper that accomodates the insertion logic along with transaction provided to re-use the same function
-        //therfore reducing the redundancy of insertion logic in general
-        if let Err(e) = self
-            .insert_bead_with_conn(
-                &mut local_transaction,
-                bead,
-                txs_json,
-                relative_json,
-                parent_timestamp_json,
-                bead_id,
-            )
-            .await
-        {
-            error!(error = ?e, "Failed to insert bead, rolling back transaction");
-            match local_transaction.rollback().await {
-                Ok(_) => {
-                    info!("Transaction rolled back successfully");
-                }
-                Err(rollback_error) => {
-                    error!(error = ?rollback_error, "Failed to rollback transaction");
-                }
-            }
-            return Err(e);
-        }
-
-        match local_transaction.commit().await {
-            Ok(_) => {
-                debug!("Transaction committed and not rolledback");
-            }
-            Err(error) => {
-                error!(error = ?error, "Failed to commit transaction");
-                return Err(DBErrors::InsertionTransactionNotCommitted {
-                    error: error.to_string(),
-                    query_name: "Insert transaction either fallback or sequential insertion"
-                        .to_string(),
-                });
-            }
-        };
-        Ok(())
-    }
-
-    /// Helper function to insert a bead using an existing transaction connection
-    async fn insert_bead_with_conn(
-        &self,
-        parent_transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        bead: Bead,
-        txs_json: String,
-        relative_json: String,
-        parent_timestamp_json: String,
-        bead_id: &usize,
-    ) -> Result<(), DBErrors> {
-        let hex_converted_extranonce_1 =
-            hex::encode(bead.uncommitted_metadata.extra_nonce_1.to_be_bytes());
-        let hex_converted_extranonce_2 =
-            hex::encode(bead.uncommitted_metadata.extra_nonce_2.to_be_bytes());
-        let block_header_bytes = bead.block_header.block_hash().to_byte_array().to_vec();
-        let prev_block_hash_bytes = bead.block_header.prev_blockhash.to_byte_array().to_vec();
-        let merkle_root_bytes = bead.block_header.merkle_root.to_byte_array().to_vec();
-        let payout_addr_bytes = bead.committed_metadata.payout_address.as_bytes().to_vec();
-        let public_key_bytes = bead.committed_metadata.comm_pub_key.to_vec();
-        let signature_bytes = bead.uncommitted_metadata.signature.to_vec();
-
-        //All fields are in be format
-        if let Err(e) = sqlx::query(&INSERT_QUERY)
-            .bind(*bead_id as i64)
-            .bind(block_header_bytes)
-            .bind(bead.block_header.version.to_consensus())
-            .bind(prev_block_hash_bytes)
-            .bind(merkle_root_bytes)
-            .bind(bead.block_header.time.to_u32())
-            .bind(bead.block_header.bits.to_consensus())
-            .bind(bead.block_header.nonce)
-            .bind(payout_addr_bytes)
-            .bind(bead.committed_metadata.start_timestamp.to_u32())
-            .bind(public_key_bytes)
-            .bind(bead.committed_metadata.min_target.to_consensus())
-            .bind(bead.committed_metadata.weak_target.to_consensus())
-            .bind(bead.committed_metadata.miner_ip)
-            .bind(hex_converted_extranonce_1.to_string())
-            .bind(hex_converted_extranonce_2.to_string())
-            .bind(bead.uncommitted_metadata.broadcast_timestamp.to_u32())
-            .bind(signature_bytes)
-            .bind(txs_json)
-            .bind(relative_json)
-            .bind(parent_timestamp_json)
-            .execute(&mut **parent_transaction)
-            .await
-        {
-            error!(error = ?e, "Bead insertion failed");
-            return Err(DBErrors::InsertionTransactionNotCommitted {
-                error: e.to_string(),
-                query_name: "Bead insert".to_string(),
-            });
-        }
-        Ok(())
-    }
     /// Build the per-bead (transactions, relatives, parent-timestamps) tuple rows
     fn prepare_bead_tuple_values(
         &self,
@@ -268,19 +153,6 @@ impl DBHandler {
         Ok((txs_values, relatives_values, parent_ts_values))
     }
 
-    fn prepare_bead_tuple_data(
-        &self,
-        bead_index_mapping: &HashMap<BeadHash, (usize, u32)>,
-        bead: &Bead,
-    ) -> anyhow::Result<(String, String, String)> {
-        let (txs, relatives, parent_ts) =
-            self.prepare_bead_tuple_values(bead_index_mapping, bead)?;
-        Ok((
-            serde_json::to_string(&txs)?,
-            serde_json::to_string(&relatives)?,
-            serde_json::to_string(&parent_ts)?,
-        ))
-    }
     /// Inserting chunks for bulk insertions
     async fn bulk_insert_chunk(
         &self,
@@ -498,115 +370,6 @@ impl DBHandler {
         while let Some(query_request) = self.receiver.recv().await {
             match query_request {
                 BraidpoolDBTypes::InsertTupleTypes { query } => match query {
-                    InsertTupleTypes::InsertBeadSequentially {
-                        bead_to_insert,
-                        bead_index_mapping,
-                        removed_orphans,
-                        bead_id,
-                    } => {
-                        let bead_hash = bead_to_insert.block_header.block_hash();
-                        let (txs_json, relative_json, parent_timestamp_json) = match self
-                            .prepare_bead_tuple_data(&bead_index_mapping, &bead_to_insert)
-                        {
-                            Ok((txs, relatives, parent_ts)) => (txs, relatives, parent_ts),
-                            Err(error) => {
-                                error!(
-                                    error = ?error,
-                                    bead_id = bead_id,
-                                    bead_hash = %bead_hash,
-                                    "Failed to prepare bead tuple data"
-                                );
-                                continue;
-                            }
-                        };
-                        match self
-                            .insert_bead(
-                                bead_to_insert,
-                                txs_json,
-                                relative_json,
-                                parent_timestamp_json,
-                                &bead_id,
-                            )
-                            .await
-                        {
-                            Ok(_) => {
-                                debug!(
-                                    bead_id = bead_id,
-                                    bead_hash = %bead_hash,
-                                    "Bead inserted successfully"
-                                );
-                                //Inserting the beads removed from orphan set upon the extension of current bead
-                                for orphan in removed_orphans.into_iter() {
-                                    let orphan_hash = orphan.block_header.block_hash();
-                                    let orphan_bead_id = match bead_index_mapping.get(&orphan_hash)
-                                    {
-                                        Some((id, _)) => *id,
-                                        None => {
-                                            error!(
-                                                orphan_hash = %orphan_hash,
-                                                "Orphan bead index not found in mapping, skipping"
-                                            );
-                                            break;
-                                        }
-                                    };
-                                    let (txs_json, relative_json, parent_timestamp_json) =
-                                        match self
-                                            .prepare_bead_tuple_data(&bead_index_mapping, &orphan)
-                                        {
-                                            Ok((txs, relatives, parent_ts)) => {
-                                                (txs, relatives, parent_ts)
-                                            }
-                                            Err(error) => {
-                                                error!(
-                                                    error = ?error,
-                                                    bead_id = orphan_bead_id,
-                                                    bead_hash = %bead_hash,
-                                                    "Failed to prepare orphan bead tuple data"
-                                                );
-                                                break;
-                                            }
-                                        };
-
-                                    match self
-                                        .insert_bead(
-                                            orphan,
-                                            txs_json,
-                                            relative_json,
-                                            parent_timestamp_json,
-                                            &orphan_bead_id,
-                                        )
-                                        .await
-                                    {
-                                        Ok(_) => {
-                                            warn!(
-                                                orphan_bead_id = orphan_bead_id,
-                                                bead_hash = %bead_hash,
-                                                "Orphan bead inserted successfully"
-                                            );
-                                        }
-                                        Err(error) => {
-                                            error!(
-                                                error = ?error,
-                                                orphan_bead_id = orphan_bead_id,
-                                                bead_hash = %bead_hash,
-                                                "Failed to re-insert orphan bead"
-                                            );
-                                            break;
-                                        }
-                                    };
-                                }
-                            }
-                            Err(error) => {
-                                error!(
-                                    error = ?error,
-                                    bead_id = bead_id,
-                                    bead_hash = %bead_hash,
-                                    "Failed to insert bead"
-                                );
-                                continue;
-                            }
-                        };
-                    }
                     InsertTupleTypes::InsertBeadsBatch {
                         beads_to_insert,
                         removed_orphans,

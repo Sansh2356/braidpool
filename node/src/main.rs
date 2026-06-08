@@ -47,8 +47,6 @@ use behaviour::{BraidPoolBehaviour, BraidPoolBehaviourEvent};
 use crate::behaviour::KADPROTOCOLNAME;
 /// Minimum number of connected peers before IBD is triggered.
 const MIN_PEERS_FOR_IBD: usize = 1;
-/// Delay (seconds) before the initial IBD kickstart attempt after startup.
-const IBD_TRIGGER_AFTER: u64 = 20;
 //boot nodes peerIds
 const BOOTNODES: [&str; 1] = ["12D3KooWG9z8TziaNuYyEcc9FeUC3FTtrEf2XSnSdDpLvx4Jh2w3"];
 //dns NS
@@ -207,23 +205,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
     let (block_submission_tx, block_submission_rx) =
         tokio::sync::mpsc::unbounded_channel::<node::stratum::BlockSubmissionRequest>();
-    //IBD notifier task after peer_discovery
-    let swarm_command_sender_ref = swarm_command_sender.clone();
-    let _ibd_trigger_handler = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(IBD_TRIGGER_AFTER)).await;
-        //Sending IBD initiating command
-        match swarm_command_sender_ref
-            .send(SwarmCommand::InitiateIBD)
-            .await
-        {
-            Ok(_) => {
-                info!("IBD trigger sent");
-            }
-            Err(error) => {
-                error!(error=?error,"An error occurred while initiating IBD after waiting for peer discovery - ");
-            }
-        };
-    });
     //Initializing stratum server
     let mut stratum_server = Server::new(
         stratum_config,
@@ -423,7 +404,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             "testnet" | "testnet4" => Network::Testnet(bitcoin::TestnetVersion::V4),
             "signet" => Network::Signet,
             "regtest" => Network::Regtest,
-            // "cpunet" => Network::CPUNet,
+            "cpunet" => Network::CPUNet,
             _ => {
                 error!(
                     network = %network_name,

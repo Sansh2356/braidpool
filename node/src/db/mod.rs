@@ -8,12 +8,6 @@ pub mod init_db;
 #[derive(Debug, Clone)]
 
 pub enum InsertTupleTypes {
-    InsertBeadSequentially {
-        bead_to_insert: Bead,
-        removed_orphans: Vec<Bead>,
-        bead_index_mapping: HashMap<bitcoin::BlockHash, (usize, u32)>,
-        bead_id: usize,
-    },
     InsertBeadsBatch {
         beads_to_insert: Vec<Bead>,
         removed_orphans: Vec<Bead>,
