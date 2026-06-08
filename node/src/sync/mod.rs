@@ -68,7 +68,7 @@ pub enum SyncEvent {
     PeerDisconnected { peer: PeerId },
 }
 
-/// Outputs from the engine, executed by the adapter against the real world.
+/// Outputs from the engine, executed by the ingest handler.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SyncAction {
     /// Send a fully-formed bead-sync request to `peer` (`GetTips` or `GetBeads`,
@@ -104,8 +104,7 @@ pub struct SyncEngine {
     active: Option<SyncPeerState>,
     /// Consecutive IBD failures per peer. A peer reaching the retry ceiling is
     /// surfaced via [`SyncEngine::exhausted_peers`] so the adapter excludes it
-    /// from sync-peer selection — mirroring #309's per-peer `retry_count` capped
-    /// at `MAX_IBD_RETRIES`. Cleared when a sync completes.
+    /// from sync-peer selection  according to MAX_LIMIT
     retries: HashMap<PeerId, u64>,
     retry: RetryPolicy,
 }
@@ -121,7 +120,7 @@ impl SyncEngine {
         }
     }
 
-    /// Current protocol state (primarily for tests and diagnostics).
+    /// Current protocol state.
     pub fn state(&self) -> &SyncState {
         &self.state
     }
@@ -239,7 +238,6 @@ impl SyncEngine {
             return Vec::new();
         }
 
-        // Anti-spam: every received bead must have been requested in this page.
         let expected: HashSet<&BeadHash> = match self.active.as_ref() {
             Some(active) => active.queue.iter().collect(),
             None => return Vec::new(),
@@ -251,9 +249,7 @@ impl SyncEngine {
             return self.drop_peer(peer);
         }
 
-        // Hand the validated beads to the adapter to extend + persist. Cursor
-        // advancement below works purely on the hash queue, independent of the
-        // bead payloads, so we can move them straight into the action.
+        // Hand the validated beads to the adapter to extend + persist .
         let mut actions = vec![SyncAction::ApplyBeads { beads }];
 
         let (offset, queue_len) = match self.active.as_ref() {
@@ -276,10 +272,8 @@ impl SyncEngine {
                 request: BeadRequest::GetBeads(BeadHashes(batch)),
             });
         } else if queue_len >= IBD_HASH_PAGE_MAX {
-            // Page fully downloaded and it was full, so more pages likely remain.
-            // Request the next page *after the tips that result from applying this
-            // batch* — hence RequestHashPage (executed after the ApplyBeads above)
-            // rather than a tips-carrying request, which would re-fetch this page.
+            // Page fetched completely but IBD requires more beads to be fetched
+            // from the sync peer, thus requesting the new peer after extending these fetched beads .
             if let Some(active) = self.active.as_mut() {
                 active.queue.clear();
                 active.offset = 0;
@@ -287,7 +281,7 @@ impl SyncEngine {
             self.state = SyncState::FetchingHashes;
             actions.push(SyncAction::RequestHashPage { peer });
         } else {
-            // Final, short page fully downloaded -> IBD complete.
+            //Short page -> IBD complete.
             actions.extend(self.complete());
         }
         actions
@@ -343,9 +337,7 @@ impl SyncEngine {
     }
 }
 
-/// Prune a page of hashes down to the prefix that covers all of the peer's tips,
-/// mirroring the inlined IBD behaviour (limits duplicate downloads and bounds the
-/// page). If the peer advertised no tips, the page is used unchanged.
+/// Prune a page of hashes down to the prefix that covers all of the peer's tips
 fn prune_to_tips(hashes: Vec<BeadHash>, peer_tips: &[BeadHash]) -> Vec<BeadHash> {
     if peer_tips.is_empty() {
         return hashes;

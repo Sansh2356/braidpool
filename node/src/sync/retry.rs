@@ -2,10 +2,6 @@ use std::time::Duration;
 
 /// Backoff policy governing how IBD re-attempts after a sync request fails, times
 /// out, or the sync peer disconnects.
-///
-/// Single-peer IBD switches sync targets on failure; this policy only decides
-/// *how long to wait* before the next attempt and *when to stop counting it as a
-/// transient failure*. Peer selection itself is the adapter's (PeerManager's) job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetryPolicy {
     /// Delay for the first retry; subsequent retries grow exponentially from here.
@@ -13,7 +9,7 @@ pub struct RetryPolicy {
     /// Upper bound on the computed delay.
     max: Duration,
     /// Number of consecutive failed attempts after which the current sync target
-    /// is considered exhausted (the adapter should rotate to another peer).
+    /// is considered exhausted switching to another peer if any present for syncing.
     max_retries: u64,
 }
 
@@ -37,9 +33,7 @@ impl RetryPolicy {
         attempts >= self.max_retries
     }
 
-    /// Exponential backoff: `base * 2^attempts`, saturating and capped at `max`.
-    ///
-    /// `attempts == 0` yields `base` (the delay before the first retry).
+    /// Basic Exponential backoff: `base * 2^attempts`, saturating and capped at `max`.
     pub fn delay(&self, attempts: u64) -> Duration {
         let factor = 1u64.checked_shl(attempts as u32).unwrap_or(u64::MAX);
         let secs = self.base.as_secs().saturating_mul(factor);
@@ -53,8 +47,6 @@ impl RetryPolicy {
 }
 
 impl Default for RetryPolicy {
-    /// Mirrors the historical IBD constants: a 20s base delay, capped at 5
-    /// minutes, with up to 10 attempts against a single sync target.
     fn default() -> Self {
         Self {
             base: Duration::from_secs(20),

@@ -260,7 +260,7 @@ fn failure_schedules_retry() {
 
 #[test]
 fn peer_exhausted_after_max_retries() {
-    // Mirrors #309's per-peer retry_count / MAX_IBD_RETRIES: after `max_retries`
+    // Mirrors per-peer retry_count / MAX_IBD_RETRIES: after `max_retries`
     // consecutive failures the peer is reported as exhausted so the adapter can
     // exclude it from selection.
     let max = 3;

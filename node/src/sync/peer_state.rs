@@ -11,9 +11,7 @@ pub struct SyncPeerState {
     /// Tips advertised by the peer (from the `GetTips` response). Used to prune
     /// the hash page so we stop once all of the peer's tips are covered.
     pub peer_tips: Vec<BeadHash>,
-    /// The current page of bead hashes being downloaded (post-pruning). This is
-    /// also the set of hashes the peer is allowed to answer with — anything
-    /// outside it is treated as unsolicited (anti-spam).
+    /// The current page of bead hashes being downloaded (post-pruning).
     pub queue: Vec<BeadHash>,
     /// Number of hashes from `queue` already requested via `GetBeads`.
     pub offset: usize,
