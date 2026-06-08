@@ -4,12 +4,14 @@ use libp2p::PeerId;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
+pub mod ingest_bead;
 pub mod peer_state;
 pub mod retry;
 
 #[cfg(test)]
 mod tests;
 
+pub use ingest_bead::{ingest_beads, IngestOutcome};
 pub use peer_state::SyncPeerState;
 pub use retry::RetryPolicy;
 
