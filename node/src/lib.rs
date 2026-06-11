@@ -1,8 +1,11 @@
 //These implementations must be defined under lib.rs as they are required for intergration tests
-use crate::{db::db_handlers::prepare_bead_tuple_data, rpc_server::DashboardEvents};
+use crate::{
+    db::db_handlers::prepare_bead_tuple_data, rpc_server::DashboardEvents,
+    utils::compute_block_hash,
+};
 use bitcoin::{
-    consensus::encode::deserialize, ecdsa::Signature, pow::CompactTargetExt, BlockHash,
-    CompactTarget, EcdsaSighashType, Txid,
+    consensus::encode::deserialize, ecdsa::Signature, BlockHash, CompactTarget, EcdsaSighashType,
+    Txid,
 };
 use num::ToPrimitive;
 use std::{
@@ -176,11 +179,15 @@ pub async fn ipc_template_consumer(
 
             let candidate_block: Result<
                 bitcoin::blockdata::block::Block,
-                bitcoin::consensus::DeserializeError,
+                bitcoin::consensus::encode::Error,
             > = deserialize(&template_bytes);
-
             let merkle_branch_coinbase = ipc_template.components.coinbase_merkle_path.clone();
-            let (template_header, template_transactions) = candidate_block.unwrap().into_parts();
+            let (template_header, template_transactions) = match candidate_block {
+                Ok(template) => (template.header, template.txdata),
+                Err(_error) => {
+                    return Err(IPCtemplateError::TemplateConsumeError);
+                }
+            };
             let _coinbase_transaction = template_transactions.get(0);
 
             debug!(template_id = %template_id, template_header = ?template_header, "New block template");
@@ -287,7 +294,8 @@ impl SwarmHandler {
         //TODO: Will be used as seperate entity after altering `uncommitted_metadata`
         extranonce_1_raw_value: u32,
     ) -> Result<(), StratumErrors> {
-        let (candidate_block_header, candidate_block_transactions) = candidate_block.into_parts();
+        let candidate_block_header = candidate_block.header;
+        let candidate_block_transactions = candidate_block.txdata;
         let ids: Vec<Txid> = candidate_block_transactions
             .iter()
             .map(|tx| tx.compute_txid())
@@ -305,7 +313,7 @@ impl SwarmHandler {
         //Committing parents data in bead
         for tip_bead in tips_index {
             let current_tip_bead = braid_data.beads.get(*tip_bead).unwrap();
-            parent_hash_set.insert(current_tip_bead.block_header.block_hash());
+            parent_hash_set.insert(braid_data.compute_bead_hash(current_tip_bead));
             time_hash_set
                 .0
                 .push(current_tip_bead.committed_metadata.start_timestamp);
@@ -334,7 +342,7 @@ impl SwarmHandler {
         //TODO:This will be either be generated via the `Pubkey` from config parameter from `~/.braidpool`
         let hex = "3046022100839c1fbc5304de944f697c9f4b1d01d1faeba32d751c0f7acb21ac8a0f436a72022100e89bd46bb3a5a62adc679f659b7ce876d83ee297c7a5587b2011c4fcc72eab45";
         let sig = Signature {
-            signature: secp256k1::ecdsa::Signature::from_str(hex).unwrap(),
+            signature: bitcoin::secp256k1::ecdsa::Signature::from_str(hex).unwrap(),
             sighash_type: EcdsaSighashType::All,
         };
         //Current UNIX timestamp during broadcast of bead
@@ -351,10 +359,7 @@ impl SwarmHandler {
         let unix_timestamp = duration_since_epoch.as_secs().to_u32().unwrap();
 
         let candidate_block_bead_uncommitted_metadata = UnCommittedMetadata {
-            broadcast_timestamp: bitcoin::blockdata::locktime::absolute::MedianTimePast::from_u32(
-                unix_timestamp,
-            )
-            .unwrap(),
+            broadcast_timestamp: bitcoin::absolute::Time::from_consensus(unix_timestamp).unwrap(),
             extra_nonce_1: extranonce_1_raw_value,
             extra_nonce_2: extranonce_2_raw_value,
             signature: sig,
@@ -368,7 +373,8 @@ impl SwarmHandler {
         match status {
             AddBeadStatus::BeadAdded => {
                 let new_tips: Vec<_> = braid_data.tips.iter().map(|&idx| idx).collect();
-                let bead_hash = weak_share.block_header.block_hash();
+                let bead_hash =
+                    compute_block_hash(&weak_share.block_header, &braid_data.network_name);
                 info!(
                     hash = %bead_hash,
                     new_tips = ?new_tips,
@@ -380,6 +386,7 @@ impl SwarmHandler {
                     &braid_data.beads,
                     &braid_data.bead_index_mapping,
                     &weak_share,
+                    &braid_data.network_name,
                 )
                 .unwrap();
                 let _db_insertion_command = match self
@@ -409,7 +416,7 @@ impl SwarmHandler {
                 let res = self
                     .dashboard_notification_sender
                     .new_bead
-                    .send(Some(weak_share));
+                    .send(Some(weak_share.clone()));
                 match res {
                     Ok(_) => {
                         debug!("Passing self mined bead to the dashboard notifier");
@@ -445,7 +452,7 @@ impl SwarmHandler {
                 };
             }
             _ => {
-                warn!(status = ?status, hash = %weak_share.block_header.block_hash(),
+                warn!(status = ?status, hash = %braid_data.compute_bead_hash(&weak_share),
                     "Failed to extend Braid")
             }
         }

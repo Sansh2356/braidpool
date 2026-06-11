@@ -1,14 +1,16 @@
 use super::BraidPoolBehaviourEvent as BraidPoolEvent;
 use super::*;
 use crate::bead::{Bead, BeadResponse};
+use crate::utils::compute_block_hash;
 use crate::utils::test_utils::test_utility_functions::{
     Signature, TestCommittedMetadataBuilder, TestUnCommittedMetadataBuilder, Time, TimeVec,
 };
 use bitcoin::consensus::encode::deserialize;
 use bitcoin::consensus::serialize;
-use bitcoin::BlockVersion;
-use bitcoin::CompactTarget;
-use bitcoin::{BlockHash, BlockHeader, BlockTime, EcdsaSighashType, TxMerkleNode};
+use bitcoin::hashes::Hash;
+use bitcoin::{block::Header as BlockHeader, block::Version as BlockVersion};
+use bitcoin::{secp256k1, CompactTarget};
+use bitcoin::{BlockHash, EcdsaSighashType, TxMerkleNode};
 use futures::StreamExt;
 use libp2p::floodsub::Topic;
 use libp2p::swarm::SwarmEvent;
@@ -59,7 +61,7 @@ fn create_test_bead() -> Bead {
         prev_blockhash: BlockHash::from_byte_array(test_bytes),
         bits: CompactTarget::from_consensus(486604799),
         nonce: 1,
-        time: BlockTime::from_u32(8328429),
+        time: 8328429,
         merkle_root: TxMerkleNode::from_byte_array(test_bytes),
     };
     Bead {
@@ -138,7 +140,7 @@ async fn test_bead_request_handling() {
     let local_peer_id = swarm1.local_peer_id().clone();
     // Connect swarm2 to swarm1
     let test_bead = create_test_bead();
-    let bead_hash = test_bead.block_header.block_hash();
+    let bead_hash = compute_block_hash(&test_bead.block_header, &"cpunet".to_string());
     swarm2.dial(addr.clone()).unwrap();
     // wait for connection to be established
 
@@ -331,7 +333,7 @@ async fn test_floodsub_message_propagation() {
     // Connect swarm2 to swarm1
     let test_bead = create_test_bead();
     let test_bead_ref = test_bead.clone();
-    let bead_hash = test_bead.block_header.block_hash();
+    let bead_hash = compute_block_hash(&test_bead.block_header, &"cpunet".to_string());
 
     let topic = Topic::new("test");
     swarm1
@@ -428,10 +430,10 @@ async fn test_floodsub_message_propagation() {
     });
 
     let result = rx.recv().await.unwrap();
-    let received_bead: Result<Bead, bitcoin::consensus::DeserializeError> = deserialize(&result);
+    let received_bead: Result<Bead, bitcoin::consensus::encode::Error> = deserialize(&result);
     assert_eq!(
-        received_bead.unwrap().block_header.block_hash(),
-        test_bead_ref.clone().block_header.block_hash()
+        compute_block_hash(&received_bead.unwrap().block_header, &"cpunet".to_string()),
+        compute_block_hash(&test_bead_ref.clone().block_header, &"cpunet".to_string())
     );
     _ = tokio::time::timeout(
         tokio::time::Duration::from_secs(20),

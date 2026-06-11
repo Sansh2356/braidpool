@@ -9,24 +9,24 @@ use super::Beads;
 use super::CommittedMetadata;
 use super::UnCommittedMetadata;
 use crate::committed_metadata::TimeVec;
+use crate::utils::compute_block_hash;
 use crate::utils::create_test_bead;
 use crate::utils::test_utils::test_utility_functions::*;
 use bitcoin::absolute::Time;
 use bitcoin::consensus::encode::deserialize;
 use bitcoin::consensus::encode::Decodable;
 use bitcoin::consensus::encode::Encodable;
+use bitcoin::consensus::encode::Error as DeserializeError;
 use bitcoin::consensus::serialize;
-use bitcoin::consensus::DeserializeError;
 use bitcoin::ecdsa::Signature;
-use bitcoin::pow::CompactTargetExt;
+use bitcoin::hashes::Hash;
+use bitcoin::secp256k1;
 use bitcoin::BlockHash;
-use bitcoin::BlockHeader;
-use bitcoin::BlockTime;
-use bitcoin::BlockVersion;
 use bitcoin::CompactTarget;
 use bitcoin::EcdsaSighashType;
 use bitcoin::TxMerkleNode;
 use bitcoin::Txid;
+use bitcoin::{block::Header as BlockHeader, block::Version as BlockVersion};
 use futures::executor::block_on;
 use libp2p::request_response::Codec;
 use std::collections::HashSet;
@@ -144,7 +144,7 @@ fn test_serialized_bead() {
         prev_blockhash: BlockHash::from_byte_array(test_bytes),
         bits: CompactTarget::from_consensus(32),
         nonce: 1,
-        time: BlockTime::from_u32(8328429),
+        time: 8328429,
         merkle_root: TxMerkleNode::from_byte_array(test_bytes),
     };
     let test_bead = TestBeadBuilder::new()
@@ -214,7 +214,7 @@ fn test_bead_response_serialization() {
         prev_blockhash: BlockHash::from_byte_array(test_bytes),
         bits: CompactTarget::from_consensus(32),
         nonce: 1,
-        time: BlockTime::from_u32(8328429),
+        time: 8328429,
         merkle_root: TxMerkleNode::from_byte_array(test_bytes),
     };
     let test_bead = TestBeadBuilder::new()
@@ -331,7 +331,10 @@ fn test_bead_response_codec() {
         BeadResponse::Tips(BeadHashes(vec![test_hash, test_hash2])),
         BeadResponse::Genesis(BeadHashes(vec![test_hash])),
         BeadResponse::GetAllBeads(Beads(vec![test_bead.clone(), test_bead.clone()])),
-        BeadResponse::GetBeadsAfter(BeadHashes(vec![test_bead.block_header.block_hash()])),
+        BeadResponse::GetBeadsAfter(BeadHashes(vec![compute_block_hash(
+            &test_bead.block_header,
+            &"cpunet".to_string(),
+        )])),
         BeadResponse::Error(BeadSyncError::GenesisMismatch),
         BeadResponse::Error(BeadSyncError::BeadHashNotFound),
     ];

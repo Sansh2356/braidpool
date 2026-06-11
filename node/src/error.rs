@@ -1,9 +1,8 @@
 //All braidpool specific errors are defined here
-use std::{fmt, path::PathBuf};
-
 use crate::stratum::{BlockTemplate, JobDetails};
 use crate::TemplateId;
 use bitcoin::address::ParseError as AddressParseError;
+use std::{fmt, path::PathBuf};
 use tokio::sync::oneshot;
 
 #[derive(Debug)]
@@ -488,5 +487,4 @@ impl fmt::Display for CoinbaseError {
         }
     }
 }
-
 impl std::error::Error for CoinbaseError {}
