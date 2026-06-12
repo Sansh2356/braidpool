@@ -6,9 +6,13 @@ use crate::{
 };
 use ::bitcoin::BlockHash;
 use bitcoin::{
-    absolute::MedianTimePast as Time, ecdsa::Signature, BlockHeader, BlockTime, BlockVersion,
-    CompactTarget, EcdsaSighashType, TxMerkleNode,
+    absolute::Time,
+    block::{Header as BlockHeader, Version as BlockVersion},
+    ecdsa::Signature,
+    hashes::Hash,
+    secp256k1, CompactTarget, EcdsaSighashType, TxMerkleNode,
 };
+use braidpool_common::cpunet::Cpunet;
 // Standard Imports
 #[allow(unused_imports)]
 use tracing::{debug, error, info, trace, warn};
@@ -35,6 +39,14 @@ pub(crate) fn hashset_to_vec_deterministic(hashset: &HashSet<BeadHash>) -> Vec<B
 
 pub(crate) fn vec_to_hashset(vec: Vec<BeadHash>) -> HashSet<BeadHash> {
     vec.iter().cloned().collect()
+}
+//Utility function to check and compute block_hash according to the network_type
+pub fn compute_block_hash(block_header: &BlockHeader, network_type: &String) -> BlockHash {
+    if network_type == "cpunet" {
+        Cpunet::block_hash(*block_header)
+    } else {
+        block_header.block_hash()
+    }
 }
 
 /// Get list of actual local IPv4 addresses for servers binding to 0.0.0.0
@@ -124,7 +136,7 @@ pub fn create_test_bead(nonce: u32, prev_hash: Option<BlockHash>) -> Bead {
         prev_blockhash: prev_hash.unwrap_or(BlockHash::from_byte_array(test_bytes)),
         bits: CompactTarget::from_consensus(486604799),
         nonce: nonce,
-        time: BlockTime::from_u32(8328429),
+        time: 8328429,
         merkle_root: TxMerkleNode::from_byte_array(test_bytes),
     };
     Bead {

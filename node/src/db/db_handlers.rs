@@ -4,11 +4,11 @@ use crate::{
     bead::Bead,
     db::{init_db::init_db, BraidpoolDBTypes, InsertTupleTypes},
     error::DBErrors,
-    utils::BeadHash,
+    utils::{compute_block_hash, BeadHash},
 };
 use bitcoin::{
-    absolute::MedianTimePast, ecdsa::Signature, BlockHash, BlockTime, BlockVersion, CompactTarget,
-    PublicKey, TxMerkleNode, Txid,
+    absolute::Time, block::Version as BlockVersion, ecdsa::Signature, hashes::Hash, BlockHash,
+    CompactTarget, PublicKey, TxMerkleNode, Txid,
 };
 use futures::lock::Mutex;
 use num::ToPrimitive;
@@ -52,9 +52,11 @@ pub struct DBHandler {
     receiver: Receiver<BraidpoolDBTypes>,
     //Shared across tasks for accessing DB after contention using `Mutex`
     pub db_connection_pool: Arc<Mutex<Pool<Sqlite>>>,
+    /// Network name for computing block hashes
+    pub network_name: String,
 }
 impl DBHandler {
-    pub async fn new() -> Result<(Self, Sender<BraidpoolDBTypes>), DBErrors> {
+    pub async fn new(network_name: String) -> Result<(Self, Sender<BraidpoolDBTypes>), DBErrors> {
         debug!("Initializing schema for persistent database");
         let connection = match init_db().await {
             Ok(conn) => conn,
@@ -70,6 +72,7 @@ impl DBHandler {
             Self {
                 receiver: db_handler_rx,
                 db_connection_pool: Arc::new(Mutex::new(connection)),
+                network_name,
             },
             db_handler_tx,
         ))
@@ -88,11 +91,13 @@ impl DBHandler {
             hex::encode(bead.uncommitted_metadata.extra_nonce_1.to_be_bytes());
         let hex_converted_extranonce_2 =
             hex::encode(bead.uncommitted_metadata.extra_nonce_2.to_be_bytes());
-        let block_header_bytes = bead.block_header.block_hash().to_byte_array().to_vec();
+        let block_header_bytes = compute_block_hash(&bead.block_header, &self.network_name)
+            .to_byte_array()
+            .to_vec();
         let prev_block_hash_bytes = bead.block_header.prev_blockhash.to_byte_array().to_vec();
         let merkle_root_bytes = bead.block_header.merkle_root.to_byte_array().to_vec();
         let payout_addr_bytes = bead.committed_metadata.payout_address.as_bytes().to_vec();
-        let public_key_bytes = bead.committed_metadata.comm_pub_key.to_vec();
+        let public_key_bytes = bead.committed_metadata.comm_pub_key.to_bytes();
         let signature_bytes = bead.uncommitted_metadata.signature.to_vec();
         let mut conn = match self.db_connection_pool.lock().await.begin().await {
             Ok(conn) => conn,
@@ -114,14 +119,18 @@ impl DBHandler {
             .bind(bead.block_header.bits.to_consensus())
             .bind(bead.block_header.nonce)
             .bind(payout_addr_bytes)
-            .bind(bead.committed_metadata.start_timestamp.to_u32())
+            .bind(bead.committed_metadata.start_timestamp.to_consensus_u32())
             .bind(public_key_bytes)
             .bind(bead.committed_metadata.min_target.to_consensus())
             .bind(bead.committed_metadata.weak_target.to_consensus())
             .bind(bead.committed_metadata.miner_ip)
             .bind(hex_converted_extranonce_1.to_string())
             .bind(hex_converted_extranonce_2.to_string())
-            .bind(bead.uncommitted_metadata.broadcast_timestamp.to_u32())
+            .bind(
+                bead.uncommitted_metadata
+                    .broadcast_timestamp
+                    .to_consensus_u32(),
+            )
             .bind(signature_bytes)
             .bind(txs_json)
             .bind(relative_json)
@@ -174,7 +183,8 @@ impl DBHandler {
                         parent_timestamp_json,
                         bead_id,
                     } => {
-                        let bead_hash = bead_to_insert.block_header.block_hash();
+                        let bead_hash =
+                            compute_block_hash(&bead_to_insert.block_header, &self.network_name);
                         match self
                             .insert_bead(
                                 bead_to_insert,
@@ -212,6 +222,7 @@ pub fn prepare_bead_tuple_data(
     beads: &Vec<Bead>,
     bead_index_mapping: &HashMap<BeadHash, usize>,
     bead: &Bead,
+    network_name: &str,
 ) -> anyhow::Result<(String, String, String)> {
     let mut parent_set: HashMap<usize, HashSet<usize>> = HashMap::new();
 
@@ -225,7 +236,10 @@ pub fn prepare_bead_tuple_data(
     }
 
     let bead_id = *bead_index_mapping
-        .get(&bead.block_header.block_hash())
+        .get(&compute_block_hash(
+            &bead.block_header,
+            &network_name.to_string(),
+        ))
         .unwrap();
     let current_parents = parent_set.get(&bead_id).cloned().unwrap_or_default();
 
@@ -237,7 +251,7 @@ pub fn prepare_bead_tuple_data(
         let ts = beads[parent]
             .committed_metadata
             .start_timestamp
-            .to_u32()
+            .to_consensus_u32()
             .to_u64()
             .expect("An error occurred while casting u32 to u64");
 
@@ -350,7 +364,7 @@ pub async fn fetch_beads_in_batch(
                 bead.block_header.version =
                     BlockVersion::from_consensus(row.get::<i32, _>("nVersion"));
                 bead.block_header.bits = CompactTarget::from_consensus(row.get::<u32, _>("nBits"));
-                bead.block_header.time = BlockTime::from_u32(row.get::<u32, _>("nTime"));
+                bead.block_header.time = row.get::<u32, _>("nTime");
                 bead.block_header.nonce = row.get::<u32, _>("nNonce");
 
                 let prev_bytes: Vec<u8> = row.get("hashPrevBlock");
@@ -396,12 +410,11 @@ pub async fn fetch_beads_in_batch(
                 bead.committed_metadata.weak_target =
                     CompactTarget::from_consensus(row.get::<u32, _>("weak_target"));
                 bead.committed_metadata.miner_ip = row.get("miner_ip");
-
                 bead.committed_metadata.start_timestamp =
-                    MedianTimePast::from_u32(row.get::<u32, _>("start_timestamp")).unwrap();
+                    Time::from_consensus(row.get::<u32, _>("start_timestamp")).unwrap();
 
                 bead.uncommitted_metadata.broadcast_timestamp =
-                    MedianTimePast::from_u32(row.get::<u32, _>("broadcast_timestamp")).unwrap();
+                    Time::from_consensus(row.get::<u32, _>("broadcast_timestamp")).unwrap();
 
                 bead.uncommitted_metadata.extra_nonce_1 =
                     u32::from_str_radix(&row.get::<String, _>("extranonce1"), 16).unwrap();
@@ -439,7 +452,7 @@ pub async fn fetch_beads_in_batch(
                 bead.committed_metadata
                     .parent_bead_timestamps
                     .0
-                    .push(MedianTimePast::from_u32(ts as u32).unwrap());
+                    .push(Time::from_consensus(ts as u32).unwrap());
             }
         }
     }
@@ -481,14 +494,14 @@ pub async fn fetch_bead_by_bead_hash(
                     });
                 }
             };
-            let ntime = BlockTime::from_u32(row.get::<u32, _>("nTime"));
+            let ntime = row.get::<u32, _>("nTime");
             let nbits = CompactTarget::from_consensus(row.get::<u32, _>("nBits"));
             let nonce = row.get::<u32, _>("nNonce");
             let payout_address = std::str::from_utf8(&row.get::<Vec<u8>, _>("payout_address"))
                 .unwrap()
                 .to_string();
             let start_timestamp =
-                MedianTimePast::from_u32(row.get::<u32, _>("start_timestamp")).unwrap();
+                Time::from_consensus(row.get::<u32, _>("start_timestamp")).unwrap();
             let pub_key = PublicKey::from_slice(&row.get::<Vec<u8>, _>("comm_pub_key")).unwrap();
             let min_target = CompactTarget::from_consensus(row.get::<u32, _>("min_target"));
             let weak_target = CompactTarget::from_consensus(row.get::<u32, _>("weak_target"));
@@ -498,7 +511,7 @@ pub async fn fetch_bead_by_bead_hash(
             let extranonce_2 =
                 u32::from_str_radix(&row.get::<String, _>("extranonce2"), 16).unwrap();
             let broadcast_timestamp =
-                MedianTimePast::from_u32(row.get::<u32, _>("broadcast_timestamp")).unwrap();
+                Time::from_consensus(row.get::<u32, _>("broadcast_timestamp")).unwrap();
             let signature = Signature::from_slice(&row.get::<Vec<u8>, _>("signature")).unwrap();
             bead_id = id;
             fetched_bead.block_header.version = version;
@@ -593,7 +606,7 @@ pub async fn fetch_bead_by_bead_hash(
             .committed_metadata
             .parent_bead_timestamps
             .0
-            .push(MedianTimePast::from_u32(parent_timestamp as u32).unwrap());
+            .push(Time::from_consensus(parent_timestamp as u32).unwrap());
         //Extending parent committment by parent hash
         fetched_bead
             .committed_metadata
@@ -685,13 +698,16 @@ pub mod test {
             let mut ancestor_mapping: HashMap<usize, HashSet<usize>> = HashMap::new();
             consensus_functions::updating_ancestors(
                 &current_file_braid,
-                bead.block_header.block_hash(),
+                compute_block_hash(&bead.block_header, &"cpunet".to_string()),
                 &mut ancestor_mapping,
                 &braid_parent_set,
             );
             let bead_id = current_file_braid
                 .bead_index_mapping
-                .get(&bead.block_header.block_hash())
+                .get(&compute_block_hash(
+                    &bead.block_header,
+                    &"cpunet".to_string(),
+                ))
                 .unwrap();
             let current_bead_parent_set = braid_parent_set.get(&(bead_id)).unwrap();
             let mut relative_tuples: Vec<(u64, u64)> = Vec::new();
@@ -708,7 +724,10 @@ pub mod test {
                 parent_timestamp_tuples.push((
                     (*parent_bead as u64),
                     (*bead_id as u64),
-                    current_parent_timestamp.to_u32().to_u64().unwrap(),
+                    current_parent_timestamp
+                        .to_consensus_u32()
+                        .to_u64()
+                        .unwrap(),
                 ));
             }
             for bead_tx in bead.committed_metadata.transaction_ids.0.iter() {
@@ -756,11 +775,13 @@ pub mod test {
                 hex::encode(bead.uncommitted_metadata.extra_nonce_1.to_be_bytes());
             let hex_converted_extranonce_2 =
                 hex::encode(bead.uncommitted_metadata.extra_nonce_2.to_be_bytes());
-            let block_header_bytes = bead.block_header.block_hash().to_byte_array().to_vec();
+            let block_header_bytes = compute_block_hash(&bead.block_header, &"cpunet".to_string())
+                .to_byte_array()
+                .to_vec();
             let prev_block_hash_bytes = bead.block_header.prev_blockhash.to_byte_array().to_vec();
             let merkle_root_bytes = bead.block_header.merkle_root.to_byte_array().to_vec();
             let payout_addr_bytes = bead.committed_metadata.payout_address.as_bytes().to_vec();
-            let public_key_bytes = bead.committed_metadata.comm_pub_key.to_vec();
+            let public_key_bytes = bead.committed_metadata.comm_pub_key.to_bytes();
             let signature_bytes = bead.uncommitted_metadata.signature.to_vec();
             let mut test_insertion_tx = test_pool.begin().await.unwrap();
             if let Err(e) = sqlx::query(&INSERT_QUERY)
@@ -773,14 +794,18 @@ pub mod test {
                 .bind(bead.block_header.bits.to_consensus())
                 .bind(bead.block_header.nonce)
                 .bind(payout_addr_bytes)
-                .bind(bead.committed_metadata.start_timestamp.to_u32())
+                .bind(bead.committed_metadata.start_timestamp.to_consensus_u32())
                 .bind(public_key_bytes)
                 .bind(bead.committed_metadata.min_target.to_consensus())
                 .bind(bead.committed_metadata.weak_target.to_consensus())
                 .bind(bead.committed_metadata.miner_ip.clone())
                 .bind(hex_converted_extranonce_1.to_string())
                 .bind(hex_converted_extranonce_2.to_string())
-                .bind(bead.uncommitted_metadata.broadcast_timestamp.to_u32())
+                .bind(
+                    bead.uncommitted_metadata
+                        .broadcast_timestamp
+                        .to_consensus_u32(),
+                )
                 .bind(signature_bytes)
                 .bind(test_tx_json)
                 .bind(test_relative_json)
@@ -812,17 +837,17 @@ pub mod test {
             };
             let fetched_test_bead = fetch_bead_by_bead_hash(
                 Arc::new(Mutex::new(test_pool.clone())),
-                bead.block_header.block_hash(),
+                compute_block_hash(&bead.block_header, &"cpunet".to_string()),
             )
             .await
             .unwrap();
             assert_eq!(
-                fetched_test_bead
-                    .unwrap()
-                    .block_header
-                    .block_hash()
-                    .to_string(),
-                bead.block_header.block_hash().to_string()
+                compute_block_hash(
+                    &fetched_test_bead.unwrap().block_header,
+                    &"cpunet".to_string()
+                )
+                .to_string(),
+                compute_block_hash(&bead.block_header, &"cpunet".to_string()).to_string()
             );
         }
     }

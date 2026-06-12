@@ -9,9 +9,9 @@ pub use crate::committed_metadata::TimeVec;
 #[cfg(test)]
 use crate::uncommitted_metadata::UnCommittedMetadata;
 #[cfg(test)]
-pub use bitcoin::ecdsa::Signature;
+use bitcoin::block::Header as BlockHeader;
 #[cfg(test)]
-use bitcoin::BlockHeader;
+pub use bitcoin::ecdsa::Signature;
 #[cfg(test)]
 pub use bitcoin::{absolute::Time, p2p::address::AddrV2, PublicKey, Transaction};
 #[cfg(test)]
@@ -21,18 +21,18 @@ pub mod test_utility_functions {
         str::FromStr,
     };
 
+    use bitcoin::secp256k1::{Message, Secp256k1, SecretKey};
     #[cfg(test)]
     use bitcoin::Txid;
     use bitcoin::{
-        pow::CompactTargetExt, BlockHash, BlockTime, BlockVersion, CompactTarget, EcdsaSighashType,
+        block::Version as BlockVersion, hashes::Hash, BlockHash, CompactTarget, EcdsaSighashType,
         TxMerkleNode,
     };
-    use rand::{rngs::OsRng, thread_rng, RngCore};
-    use secp256k1::{Message, Secp256k1, SecretKey};
+    use rand::{rngs::OsRng, RngCore};
     use serde::{Deserialize, Serialize};
 
     #[cfg(test)]
-    use crate::braid::Braid;
+    use crate::{braid::Braid, utils::compute_block_hash};
 
     pub use super::*;
     #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -65,7 +65,10 @@ pub mod test_utility_functions {
         for bead_idx in file_braid.clone().parents {
             let random_test_bead = emit_bead();
             test_braid_vector_bead_mapping.insert(
-                random_test_bead.clone().block_header.block_hash(),
+                compute_block_hash(
+                    &random_test_bead.clone().block_header,
+                    &"cpunet".to_string(),
+                ),
                 bead_idx.0,
             );
             beads_to_idx.insert(bead_idx.0, random_test_bead.clone());
@@ -76,8 +79,10 @@ pub mod test_utility_functions {
             let mut parent_idx_set: HashSet<usize> = HashSet::new();
             if let Some(current_bead_parents) = file_braid.parents.get(&idx) {
                 for parent_bead_idx in current_bead_parents {
-                    let parent_bead_block_hash =
-                        beads_to_idx[parent_bead_idx].block_header.block_hash();
+                    let parent_bead_block_hash = compute_block_hash(
+                        &beads_to_idx[parent_bead_idx].block_header,
+                        &"cpunet".to_string(),
+                    );
                     current_bead
                         .committed_metadata
                         .parents
@@ -121,6 +126,7 @@ pub mod test_utility_functions {
                 cohorts: current_bead_cohorots,
                 cohort_tips: vec![HashSet::new()], // Cohorts tips are only used in extend(), so we can skip them here.
                 orphan_beads: Vec::new(),
+                network_name: "cpunet".to_string(),
             },
             file_braid.clone(),
         )
@@ -307,11 +313,9 @@ pub mod test_utility_functions {
         }
     }
     fn generate_random_public_key_string() -> String {
-        let secp = Secp256k1::new();
-        let mut rng = thread_rng();
-        let secret_key = SecretKey::new(&mut rng);
-        let public_key = PublicKey::new(secret_key.public_key(&secp));
-        public_key.to_string()
+        let secp = &Secp256k1::new();
+        let secret_key = SecretKey::new(&mut rand::thread_rng());
+        hex::encode(secret_key.public_key(secp).serialize())
     }
 
     pub fn emit_bead() -> Bead {
@@ -319,7 +323,7 @@ pub mod test_utility_functions {
 
         let random_public_key = generate_random_public_key_string()
             .parse::<bitcoin::PublicKey>()
-            .unwrap();
+            .expect("An error occurred while generating Secret key rand bytes");
         // Generate a reasonable timestamp (between 2020-01-01 and now)
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -351,7 +355,7 @@ pub mod test_utility_functions {
         let extra_nonce_1 = rand::random::<u32>();
         let extra_nonce_2 = rand::random::<u32>();
 
-        let secp = Secp256k1::new();
+        let secp = bitcoin::secp256k1::Secp256k1::new();
 
         // Generate random secret key
         let mut rng = OsRng::default();
@@ -370,7 +374,7 @@ pub mod test_utility_functions {
         let hex = hex::encode(der_sig);
 
         let sig = Signature {
-            signature: secp256k1::ecdsa::Signature::from_str(&hex).unwrap(),
+            signature: bitcoin::secp256k1::ecdsa::Signature::from_str(&hex).unwrap(),
             sighash_type: EcdsaSighashType::All,
         };
 
@@ -386,7 +390,7 @@ pub mod test_utility_functions {
             prev_blockhash: BlockHash::from_byte_array(bytes),
             bits: CompactTarget::from_consensus(486604799),
             nonce: rand::random::<u32>(),
-            time: BlockTime::from_u32(0),
+            time: 0,
             merkle_root: TxMerkleNode::from_byte_array(bytes),
         };
 
