@@ -845,26 +845,17 @@ pub async fn fetch_bead_by_bead_hash(
 #[allow(unused)]
 pub mod test {
     use super::*;
-    use crate::{
-        braid,
-        utils::test_utils::test_utility_functions::{
-            emit_bead, loading_braid_from_file, BRAIDTESTDIRECTORY,
-        },
-    };
-    use serde_json::json;
-    use std::collections::{HashMap, HashSet};
-    use std::path::Path;
+    use crate::utils::test_utils::{JSONBraid, BRAID_TEST_DIR};
     #[tokio::test]
     async fn test_batch_insertion_beads() {
         let (handler, _db_tx) = DBHandler::new_in_memory(PoolNetwork::Cpunet).await.unwrap();
         let test_pool = handler.db_connection_pool.clone();
-        let ancestors = std::env::current_dir().unwrap();
-        let ancestors_directory: Vec<&Path> = ancestors.ancestors().collect();
-        let parent_directory = ancestors_directory[1];
-        let test_absolute_path = parent_directory.join(BRAIDTESTDIRECTORY);
-        let file_path = test_absolute_path.join("random2.json");
-        let (current_file_braid, _file_braid) =
-            loading_braid_from_file(file_path.to_str().unwrap());
+        let file_path = format!(
+            "{}/../{}/random2.json",
+            env!("CARGO_MANIFEST_DIR"),
+            BRAID_TEST_DIR
+        );
+        let current_file_braid = JSONBraid::load(&file_path).make_Braid();
 
         let mut bead_insert_data =
             BeadInsertData::resolve_many(&current_file_braid, current_file_braid.beads.iter())
