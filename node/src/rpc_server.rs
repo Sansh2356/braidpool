@@ -1,6 +1,6 @@
 use crate::bead::Bead;
-use crate::braid::consensus_functions;
-use crate::braid::consensus_functions::highest_work_path;
+use crate::braid::algorithms::highest_work_path;
+use crate::braid::algorithms::reverse;
 use crate::braid::AddBeadStatus;
 use crate::braid::Braid;
 #[cfg(test)]
@@ -359,11 +359,13 @@ impl RpcServer for RpcServerImpl {
                 let _ = self.dashboard_events.new_bead.send(Some(bead));
                 Ok("Bead added successfully".to_string())
             }
-            AddBeadStatus::DagAlreadyContainsBead => Ok("Bead already exists".to_string()),
+            AddBeadStatus::DuplicateBead | AddBeadStatus::DagAlreadyContainsBead => {
+                Ok("Bead already exists".to_string())
+            }
             AddBeadStatus::InvalidBead => {
                 Err(ErrorObjectOwned::owned(4, "Invalid bead", None::<()>))
             }
-            AddBeadStatus::ParentsNotYetReceived => {
+            AddBeadStatus::ParentsMissing | AddBeadStatus::ParentsNotYetReceived => {
                 Ok("Bead queued, waiting for parents".to_string())
             }
         }
@@ -404,7 +406,6 @@ impl RpcServer for RpcServerImpl {
 
         if let Some(cohort) = braid_data.cohorts.get(cohort_id as usize) {
             let cohort_hashes: Vec<String> = cohort
-                .0
                 .iter()
                 .map(|index| {
                     braid_data
@@ -427,15 +428,14 @@ impl RpcServer for RpcServerImpl {
         info!("Get Genesis request received");
 
         let braid_data = self.braid_arc.read().await;
-
-        if braid_data.genesis_beads.len() != 1 {
+        if braid_data.geneses.len() != 1 {
             return Err(ErrorObjectOwned::owned(
                 5,
                 "Expected exactly one genesis bead ",
                 None::<()>,
             ));
         }
-        let genesis_bead_index = braid_data.genesis_beads.iter().next().unwrap();
+        let genesis_bead_index = braid_data.geneses.iter().next().unwrap();
         let genesis_bead = &braid_data.beads[*genesis_bead_index];
 
         Ok(braid_data.compute_bead_hash(genesis_bead).to_string())
@@ -690,7 +690,7 @@ impl RpcServer for RpcServerImpl {
 
         let braid_data = self.braid_arc.read().await;
 
-        let parent_index = match braid_data.bead_index_mapping.get(&parent_hash) {
+        let parent_index = match braid_data.index.get(&parent_hash) {
             Some(&index) => index,
             None => return Err(ErrorObjectOwned::owned(3, "Bead not found", None::<()>)),
         };
@@ -701,12 +701,11 @@ impl RpcServer for RpcServerImpl {
                 .committed_metadata
                 .parents
                 .iter()
-                .filter_map(|p_hash| braid_data.bead_index_mapping.get(p_hash).copied())
+                .filter_map(|p_hash| braid_data.index.get(p_hash).copied())
                 .collect();
             parents_map.insert(index, parent_indices);
         }
-
-        let children_map = consensus_functions::reverse(&braid_data, &parents_map);
+        let children_map = reverse(&braid_data.parents);
 
         let children_hashes: Vec<String> = match children_map.get(&parent_index) {
             Some(child_indices) => child_indices
@@ -729,33 +728,13 @@ impl RpcServer for RpcServerImpl {
         info!(limit = %limit, "Get highest work path by count request received");
 
         let braid_data = self.braid_arc.read().await;
+        let bead_indices_list = highest_work_path(
+            &braid_data.parents,
+            &braid_data.children,
+            &braid_data.bead_work,
+        );
 
-        let mut parents_map: HashMap<usize, HashSet<usize>> = HashMap::new();
-        for (index, bead) in braid_data.beads.iter().enumerate() {
-            let parent_indices: HashSet<usize> = bead
-                .committed_metadata
-                .parents
-                .iter()
-                .filter_map(|p_hash| braid_data.bead_index_mapping.get(p_hash).copied())
-                .collect();
-            parents_map.insert(index, parent_indices);
-        }
-
-        let children_map = consensus_functions::reverse(&braid_data, &parents_map);
-
-        let bead_list =
-            match highest_work_path(&braid_data, &parents_map, Some(&children_map), None) {
-                Ok(list) => list,
-                Err(_) => {
-                    return Err(ErrorObjectOwned::owned(
-                        5,
-                        "Failed to get highest_work path",
-                        None::<()>,
-                    ))
-                }
-            };
-
-        let available_count = bead_list.len();
+        let available_count = bead_indices_list.len();
         let requested_limit = limit as usize;
 
         // Handle empty braid case
@@ -791,7 +770,7 @@ impl RpcServer for RpcServerImpl {
             ));
         }
 
-        let hw_path_hashes: Vec<String> = bead_list
+        let hw_path_hashes: Vec<String> = bead_indices_list
             .iter()
             .take(requested_limit)
             .map(|&index| {
@@ -867,7 +846,7 @@ impl RpcServer for RpcServerImpl {
             .collect();
 
         let genesis_beads: Vec<String> = braid_data
-            .genesis_beads
+            .geneses
             .iter()
             .map(|&index| {
                 braid_data
@@ -893,7 +872,7 @@ impl RpcServer for RpcServerImpl {
             tip_count: braid_data.tips.len(),
             tips,
             cohort_count: braid_data.cohorts.len(),
-            orphan_count: braid_data.orphan_beads.len(),
+            orphan_count: braid_data.orphanage.len(),
             genesis_beads,
             total_work,
         };
@@ -1114,7 +1093,7 @@ pub async fn run_rpc_server(
     rpc_proxy_tx: mpsc::UnboundedSender<RpcProxyCommand>,
     bitcoin_rpc_config: Option<BitcoinRpcConfig>,
     db_tx: mpsc::Sender<BraidpoolDBTypes>,
-) -> Result<(SocketAddr, Arc<DashboardEvents>), ()> {
+) -> Result<(SocketAddr, Arc<DashboardEvents>), std::io::Error> {
     //Initializing the middleware
     let rpc_middleware =
         jsonrpsee::server::middleware::rpc::RpcServiceBuilder::new().layer_fn(LoggingMiddleware);
@@ -1125,10 +1104,12 @@ pub async fn run_rpc_server(
         .await
         .map_err(|e| {
             error!(bind_address = %bind_address, error = %e, "Failed to build RPC server");
+            e
         })?;
     //listening address for incoming requests/connection
     let addr = server.local_addr().map_err(|e| {
         error!(bind_address = %bind_address, error = %e, "Failed to get RPC local address");
+        e
     })?;
     //context for the served server
     let rpc_impl = RpcServerImpl::new(

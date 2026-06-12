@@ -710,7 +710,7 @@ impl AuditDAG {
                         "Bead added to braid"
                     );
                 }
-                AddBeadStatus::DagAlreadyContainsBead => {
+                AddBeadStatus::DuplicateBead | AddBeadStatus::DagAlreadyContainsBead => {
                     warn!(
                         composite_hash = %composite_hash,
                         "Bead already in DAG, treating as idempotent success"
@@ -726,7 +726,7 @@ impl AuditDAG {
                     );
                     return Err("Invalid bead".to_string());
                 }
-                AddBeadStatus::ParentsNotYetReceived => {
+                AddBeadStatus::ParentsMissing | AddBeadStatus::ParentsNotYetReceived => {
                     warn!(
                         composite_hash = %composite_hash,
                         parents = ?bead.committed_metadata.parents,
