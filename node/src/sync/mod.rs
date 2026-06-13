@@ -251,8 +251,8 @@ impl SyncEngine {
         info!(
             peer = %peer,
             page_size = pruned.len(),
-            page_total_batches = %page_total_batches,
-            "IBD hash page received; downloading beads in batches"
+            page_total_batches,
+            "IBD hash page received; downloading beads"
         );
 
         let batch_end = pruned.len().min(IBD_BATCH_SIZE);
@@ -289,6 +289,7 @@ impl SyncEngine {
         }
 
         // Hand the validated beads to the adapter to extend + persist .
+        let received = beads.len();
         let mut actions = vec![SyncAction::ApplyBeads { beads }];
 
         let (offset, queue_len) = match self.active.as_ref() {
@@ -296,35 +297,19 @@ impl SyncEngine {
             None => return actions,
         };
 
+        let page_total_batches = (queue_len + IBD_BATCH_SIZE - 1) / IBD_BATCH_SIZE;
+        let page_batch = (offset + IBD_BATCH_SIZE - 1) / IBD_BATCH_SIZE;
+        info!(
+            peer = %peer,
+            batch = %format!("{page_batch}/{page_total_batches}"),
+            range = %format!("{}..{}", offset - received, offset),
+            page_progress = %format!("{offset}/{queue_len}"),
+            "IBD batch applied"
+        );
+
         if offset < queue_len {
             // More batches remain in the current page.
             let batch_end = (offset + IBD_BATCH_SIZE).min(queue_len);
-            let page_total_batches = (queue_len + IBD_BATCH_SIZE - 1) / IBD_BATCH_SIZE;
-            if batch_end < queue_len {
-                // A full intermediate batch of the page.
-                let page_batch = offset / IBD_BATCH_SIZE;
-                info!(
-                    peer = %peer,
-                    page_batch = %page_batch,
-                    page_total_batches = %page_total_batches,
-                    page_size = %queue_len,
-                    range = %format!("{}..{}", offset, batch_end),
-                    "IBD page batch {}/{} fetched.",
-                    page_batch,
-                    page_total_batches
-                );
-            } else {
-                // The trailing, possibly partial, batch of the page.
-                let remaining = queue_len - offset;
-                info!(
-                    peer = %peer,
-                    offset = %offset,
-                    remaining = %remaining,
-                    page_size = %queue_len,
-                    "IBD final batch of current page with beads - {}",
-                    remaining
-                );
-            }
             let batch: Vec<BeadHash> = match self.active.as_ref() {
                 Some(active) => active.queue[offset..batch_end].to_vec(),
                 None => return actions,
@@ -339,7 +324,7 @@ impl SyncEngine {
         } else if queue_len >= IBD_HASH_PAGE_MAX {
             // Page fetched completely but IBD requires more beads to be fetched
             // from the sync peer, thus requesting the new peer after extending these fetched beads .
-            info!(peer = %peer, "IBD page processed, requesting next page.");
+            info!(peer = %peer, "IBD page complete, requesting next page");
             if let Some(active) = self.active.as_mut() {
                 active.queue.clear();
                 active.offset = 0;
@@ -348,17 +333,7 @@ impl SyncEngine {
             actions.push(SyncAction::RequestHashPage { peer });
         } else {
             //Short page -> IBD complete.
-            let sync_mode = if offset > IBD_BATCH_SIZE {
-                "batches"
-            } else {
-                "single-fetch"
-            };
-            info!(
-                peer = %peer,
-                sync_mode = %sync_mode,
-                "\u{1F389} IBD completed successfully via {}",
-                sync_mode
-            );
+            info!(peer = %peer, "\u{1F389} IBD completed successfully");
             actions.extend(self.complete());
         }
         actions
