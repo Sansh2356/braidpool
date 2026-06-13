@@ -85,10 +85,7 @@ impl Braid {
     pub fn extend(&mut self, bead: &Bead) -> AddBeadStatus {
         // If the braid is empty and bead has no parents, treat as genesis bead
         if self.beads.is_empty() && bead.committed_metadata.parents.is_empty() {
-            tracing::info!(
-                "I AM A GENESIS BEAD ! - {:?}",
-                bead.block_header.block_hash()
-            );
+            tracing::debug!("Genesis beadhash - {:?}", bead.block_header.block_hash());
             *self = Braid::new(vec![bead.clone()]);
             // Genesis resets the braid, so there is never an existing orphan set
             // to promote here.
@@ -285,15 +282,14 @@ impl Braid {
             }
         }
     }
-    /// utility function for GetBeadsAfter request
-    pub fn get_beads_after(&self, old_tips: Vec<BeadHash>) -> Option<Vec<Bead>> {
+    pub fn get_beads_after(&self, old_tips: Vec<BeadHash>, limit: usize) -> Option<Vec<Bead>> {
         let old_tips: HashSet<BeadHash> = old_tips.into_iter().collect();
         tracing::warn!(
             old_tips=?old_tips,"Tips received from the peer for which beads are requested for during IBD"
         );
         //In case no tips are present i.e. the new braid-node has been initialized
         if old_tips.len() == 0 {
-            return Some(self.beads.clone());
+            return Some(self.beads.iter().take(limit).cloned().collect());
         }
         let mut response_beads = Vec::new();
         let mut smallest_index = usize::MAX;
@@ -307,7 +303,7 @@ impl Braid {
         }
         //If somehow no bead matched that can be due to possible latency/fork so send all the beads instead as fallback
         if smallest_index == usize::MAX {
-            return Some(self.beads.clone());
+            return Some(self.beads.iter().take(limit).cloned().collect());
         }
 
         tracing::debug!(
@@ -324,18 +320,25 @@ impl Braid {
             }
         }
         if smallest_cohort_index == usize::MAX {
-            return Some(self.beads.clone());
+            return Some(self.beads.iter().take(limit).cloned().collect());
         }
         tracing::debug!(
             smallest_index=?smallest_index,"Smallest possible cohort index for which the given smallest index is a part of",
         );
-        while smallest_cohort_index < self.cohorts.len() {
+        'cohort_walk: while smallest_cohort_index < self.cohorts.len() {
             let cohort = &self.cohorts[smallest_cohort_index];
-            for bead_index in &cohort.0 {
-                let curr_bead = self.beads[*bead_index].clone();
+            // HashSet iteration order is non-deterministic; sort by bead-index so
+            // the wire response is reproducible across runs and peers.
+            let mut sorted_indices: Vec<usize> = cohort.0.iter().copied().collect();
+            sorted_indices.sort();
+            for bead_index in sorted_indices {
+                let curr_bead = self.beads[bead_index].clone();
                 //Not including the beads that are already present in old_tips
                 if !old_tips.contains(&curr_bead.block_header.block_hash()) {
                     response_beads.push(curr_bead);
+                    if response_beads.len() >= limit {
+                        break 'cohort_walk;
+                    }
                 } else {
                     tracing::debug!("This bead is already present in old tips thus skipping");
                 }

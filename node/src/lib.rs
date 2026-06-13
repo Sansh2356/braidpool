@@ -45,7 +45,6 @@ pub mod committed_metadata;
 pub mod config;
 pub mod db;
 pub mod error;
-pub mod ibd_manager;
 pub mod ipc;
 pub mod peer_manager;
 pub mod rpc_server;
@@ -370,29 +369,25 @@ impl SwarmHandler {
             AddBeadStatus::BeadAdded { promoted_orphans } => {
                 let new_tips: Vec<_> = braid_data.tips.iter().map(|&idx| idx).collect();
                 let bead_hash = weak_share.block_header.block_hash();
+                // Reducing the scope of the lock instead of holding it across the db operation.
+                let db_command = BraidpoolDBTypes::InsertTupleTypes {
+                    query: db::InsertTupleTypes::InsertBeadsBatch {
+                        beads_to_insert: vec![weak_share.clone()],
+                        removed_orphans: promoted_orphans,
+                        bead_index_mapping: braid_data.bead_index_mapping.clone(),
+                    },
+                };
+                drop(braid_data);
                 info!(
                     hash = %bead_hash,
                     new_tips = ?new_tips,
                     "Braid extended successfully"
                 );
-                //Considering the index of the beads in braid will be same as the (insertion ids-1)
-                let bead_id = braid_data.bead_index_mapping.get(&bead_hash).unwrap().0;
-                let _db_insertion_command = match self
-                    .db_command_sender
-                    .send(BraidpoolDBTypes::InsertTupleTypes {
-                        query: db::InsertTupleTypes::InsertBeadSequentially {
-                            bead_to_insert: weak_share.clone(),
-                            removed_orphans: promoted_orphans,
-                            bead_index_mapping: braid_data.bead_index_mapping.clone(),
-                            bead_id,
-                        },
-                    })
-                    .await
-                {
+                let _db_insertion_command = match self.db_command_sender.send(db_command).await {
                     Ok(_) => {
                         debug!(
                             hash = %bead_hash,
-                            "InsertBeadSequentially sent to DB thread"
+                            "InsertBeadsBatch sent to DB thread"
                         );
                     }
                     Err(error) => {
@@ -409,7 +404,7 @@ impl SwarmHandler {
                         debug!("Passing self mined bead to the dashboard notifier");
                     }
                     Err(error) => {
-                        error!("An error occurred while sending dashboard notification - {error}");
+                        debug!(error = %error, "No dashboard subscribers for new-bead notification; skipping");
                     }
                 }
                 //After validation of the candidate block constructed by the downstream node sending it to swarm for further propogation

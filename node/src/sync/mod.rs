@@ -3,6 +3,7 @@ use crate::utils::BeadHash;
 use libp2p::PeerId;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
+use tracing::{info, warn};
 
 pub mod ingest_bead;
 pub mod peer_state;
@@ -68,6 +69,21 @@ pub enum SyncEvent {
     Timeout { peer: PeerId },
     /// The active sync peer disconnected.
     PeerDisconnected { peer: PeerId },
+}
+
+impl SyncEvent {
+    pub fn peer(&self) -> Option<PeerId> {
+        match self {
+            SyncEvent::NoPeerAvailable => None,
+            SyncEvent::Start { peer }
+            | SyncEvent::TipsReceived { peer, .. }
+            | SyncEvent::HashPageReceived { peer, .. }
+            | SyncEvent::BeadsReceived { peer, .. }
+            | SyncEvent::RequestFailed { peer }
+            | SyncEvent::Timeout { peer }
+            | SyncEvent::PeerDisconnected { peer } => Some(*peer),
+        }
+    }
 }
 
 /// Outputs from the engine, executed by the ingest handler.
@@ -193,7 +209,9 @@ impl SyncEngine {
         if !self.is_active(peer, SyncState::AwaitingTips) {
             return Vec::new();
         }
+        info!(peer = %peer, tip_count = peer_tips.len(), "Received braid tips");
         if already_synced {
+            info!(peer = %peer, "Peer already synced to tip");
             return self.complete();
         }
         if let Some(active) = self.active.as_mut() {
@@ -209,6 +227,12 @@ impl SyncEngine {
         }
         // A peer that answers with more hashes than a page may hold is misbehaving.
         if hashes.len() > IBD_HASH_PAGE_MAX {
+            warn!(
+                peer = %peer,
+                count = hashes.len(),
+                cap = IBD_HASH_PAGE_MAX,
+                "peer exceeded IBD_HASH_PAGE_MAX; dropping connection"
+            );
             return self.drop_peer(peer);
         }
 
@@ -219,8 +243,17 @@ impl SyncEngine {
 
         // Empty page -> nothing left to download; we are synced.
         if pruned.is_empty() {
+            info!(peer = %peer, "Empty hash page received; peer already synced");
             return self.complete();
         }
+
+        let page_total_batches = (pruned.len() + IBD_BATCH_SIZE - 1) / IBD_BATCH_SIZE;
+        info!(
+            peer = %peer,
+            page_size = pruned.len(),
+            page_total_batches,
+            "IBD hash page received; downloading beads"
+        );
 
         let batch_end = pruned.len().min(IBD_BATCH_SIZE);
         let batch: Vec<BeadHash> = pruned[..batch_end].to_vec();
@@ -248,16 +281,31 @@ impl SyncEngine {
             .iter()
             .any(|bead| !expected.contains(&bead.block_header.block_hash()))
         {
+            warn!(
+                peer = %peer,
+                "Received unsolicited bead during IBD (not in requested page); dropping connection"
+            );
             return self.drop_peer(peer);
         }
 
         // Hand the validated beads to the adapter to extend + persist .
+        let received = beads.len();
         let mut actions = vec![SyncAction::ApplyBeads { beads }];
 
         let (offset, queue_len) = match self.active.as_ref() {
             Some(active) => (active.offset, active.queue.len()),
             None => return actions,
         };
+
+        let page_total_batches = (queue_len + IBD_BATCH_SIZE - 1) / IBD_BATCH_SIZE;
+        let page_batch = (offset + IBD_BATCH_SIZE - 1) / IBD_BATCH_SIZE;
+        info!(
+            peer = %peer,
+            batch = %format!("{page_batch}/{page_total_batches}"),
+            range = %format!("{}..{}", offset - received, offset),
+            page_progress = %format!("{offset}/{queue_len}"),
+            "IBD batch applied"
+        );
 
         if offset < queue_len {
             // More batches remain in the current page.
@@ -276,6 +324,7 @@ impl SyncEngine {
         } else if queue_len >= IBD_HASH_PAGE_MAX {
             // Page fetched completely but IBD requires more beads to be fetched
             // from the sync peer, thus requesting the new peer after extending these fetched beads .
+            info!(peer = %peer, "IBD page complete, requesting next page");
             if let Some(active) = self.active.as_mut() {
                 active.queue.clear();
                 active.offset = 0;
@@ -284,6 +333,7 @@ impl SyncEngine {
             actions.push(SyncAction::RequestHashPage { peer });
         } else {
             //Short page -> IBD complete.
+            info!(peer = %peer, "\u{1F389} IBD completed successfully");
             actions.extend(self.complete());
         }
         actions
