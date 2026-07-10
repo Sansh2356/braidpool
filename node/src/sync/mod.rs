@@ -7,7 +7,8 @@ use std::time::Duration;
 pub mod ingest_beads;
 pub mod peer_state;
 pub mod retry;
-
+#[cfg(test)]
+mod tests;
 pub use peer_state::SyncPeerState;
 pub use retry::RetryPolicy;
 
