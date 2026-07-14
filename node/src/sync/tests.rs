@@ -1,3 +1,10 @@
+use crate::{
+    braid::Braid,
+    db::{BraidpoolDBTypes, InsertTupleTypes},
+    sync::ingest_beads::{ingest_beads, IngestOutcome},
+    utils::test_utils::test_utility_functions::emit_bead,
+};
+
 use super::*;
 use bitcoin::BlockHash;
 use libp2p::identity::Keypair;
@@ -80,6 +87,97 @@ fn engine_downloading(page: &[Bead]) -> (SyncEngine, PeerId, Vec<SyncAction>) {
         hashes: page_hashes(page),
     });
     (e, p, acts)
+}
+/// A fresh bead whose only parent is `parent`.
+fn child_of(parent: &Bead) -> Bead {
+    let mut b = emit_bead();
+    b.committed_metadata
+        .parents
+        .insert(parent.block_header.block_hash());
+    b
+}
+
+#[test]
+fn applies_in_order_batch() {
+    let genesis = emit_bead();
+    let mut braid = Braid::new(vec![genesis.clone()]);
+    let c1 = child_of(&genesis);
+    let c2 = child_of(&c1);
+
+    let outcome = ingest_beads(&mut braid, &[c1.clone(), c2.clone()]).unwrap();
+
+    assert_eq!(outcome.added, 2);
+    assert_eq!(outcome.invalid, 0);
+    assert_eq!(outcome.beads_to_persist.len(), 2);
+    assert!(outcome.promoted_orphans.is_empty());
+}
+
+#[test]
+fn out_of_order_batch_persists_promoted_orphan() {
+    // Grandchild arrives before its parent within the same batch.
+    let genesis = emit_bead();
+    let mut braid = Braid::new(vec![genesis.clone()]);
+    let child = child_of(&genesis);
+    let grandchild = child_of(&child);
+
+    let outcome = ingest_beads(&mut braid, &[grandchild.clone(), child.clone()]).unwrap();
+
+    // Only `child` reports BeadAdded directly; `grandchild` is promoted by it.
+    assert_eq!(outcome.added, 1);
+    assert_eq!(outcome.beads_to_persist.len(), 1);
+    assert_eq!(
+        outcome.beads_to_persist[0].bead.block_header.block_hash(),
+        child.block_header.block_hash()
+    );
+    assert_eq!(outcome.promoted_orphans.len(), 1);
+    assert_eq!(
+        outcome.promoted_orphans[0].bead.block_header.block_hash(),
+        grandchild.block_header.block_hash()
+    );
+    // The whole chain is now connected.
+    assert!(braid.orphan_beads.is_empty());
+}
+
+#[test]
+fn invalid_bead_counted_not_persisted() {
+    let genesis = emit_bead();
+    let mut braid = Braid::new(vec![genesis]);
+    // A non-genesis bead with no parents is invalid.
+    let invalid = emit_bead();
+
+    let outcome = ingest_beads(&mut braid, &[invalid]).unwrap();
+
+    assert_eq!(outcome.added, 0);
+    assert_eq!(outcome.invalid, 1);
+    assert!(outcome.beads_to_persist.is_empty());
+}
+
+#[test]
+fn into_db_command_maps_to_batch_insert() {
+    let genesis = emit_bead();
+    let mut braid = Braid::new(vec![genesis.clone()]);
+    let child = child_of(&genesis);
+    let outcome = ingest_beads(&mut braid, &[child.clone()]).unwrap();
+
+    match outcome.into_db_command() {
+        Some(BraidpoolDBTypes::InsertTupleTypes {
+            query:
+                InsertTupleTypes::InsertBeadsBatch {
+                    beads,
+                    removed_orphans,
+                },
+        }) => {
+            assert_eq!(beads.len(), 1);
+            assert!(removed_orphans.is_empty());
+        }
+        other => panic!("expected InsertBeadsBatch, got {:?}", other),
+    }
+}
+
+#[test]
+fn into_db_command_is_none_when_nothing_added() {
+    let outcome = IngestOutcome::default();
+    assert!(outcome.into_db_command().is_none());
 }
 
 #[test]
