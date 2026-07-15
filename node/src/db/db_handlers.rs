@@ -43,8 +43,9 @@ const BULK_INSERT_BEADS: &str =
         unhex(json_extract(value, '$.signature')) 
     FROM json_each(?);";
 //Separating into sub-queries
-const BULK_INSERT_TRANSACTIONS: &str = "INSERT INTO Transactions (bead_id, txid) 
-    SELECT json_extract(value, '$.bead_id'), unhex(json_extract(value, '$.txid')) 
+const BULK_INSERT_TRANSACTIONS: &str = "INSERT INTO Transactions (bead_id, idx, txid)
+    SELECT json_extract(value, '$.bead_id'), json_extract(value, '$.idx'),
+        unhex(json_extract(value, '$.txid'))
     FROM json_each(?);";
 
 const BULK_INSERT_RELATIVES: &str = "INSERT INTO Relatives (child, parent) 
@@ -161,10 +162,18 @@ impl DBHandler {
         }
         let mut txs_values =
             Vec::with_capacity(data.bead.committed_metadata.transaction_ids.0.len());
-        for tx in &data.bead.committed_metadata.transaction_ids.0 {
+        for (idx, tx) in data
+            .bead
+            .committed_metadata
+            .transaction_ids
+            .0
+            .iter()
+            .enumerate()
+        {
             txs_values.push(json!({
                 "txid": hex::encode(tx.to_byte_array()),
                 "bead_id": bead_id,
+                "idx": idx as u64,
             }));
         }
         (txs_values, relatives_values, parent_ts_values)
@@ -473,8 +482,10 @@ pub async fn fetch_beads_in_batch(
         let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
 
         // Transactions for every bead in the batch.
-        let tx_sql =
-            format!("SELECT bead_id, txid FROM Transactions WHERE bead_id IN ({placeholders})");
+        let tx_sql = format!(
+            "SELECT bead_id, txid FROM Transactions WHERE bead_id IN ({placeholders}) \
+             ORDER BY bead_id, idx"
+        );
         let mut tx_query = sqlx::query(&tx_sql);
         for id in &ids {
             tx_query = tx_query.bind(id);
@@ -512,7 +523,7 @@ pub async fn fetch_beads_in_batch(
              FROM ParentTimestamps pt
              JOIN Bead pb ON pb.id = pt.parent
              WHERE pt.child IN ({placeholders})
-             ORDER BY pt.child, pt.parent"
+             ORDER BY pt.child, pb.hash"
         );
         let mut pt_query = sqlx::query(&pt_sql);
         for id in &ids {
@@ -771,51 +782,47 @@ pub async fn fetch_bead_by_bead_hash(
             });
         }
     };
-    let rows =
-        match sqlx::query("SELECT  txid as txid, bead_id FROM Transactions WHERE bead_id = ?")
-            .bind(bead_id)
-            .fetch_all(&*db_connection_arc)
-            .await
-        {
-            Ok(rows) => rows,
-            Err(error) => {
-                return Err(DBErrors::TupleNotFetched {
-                    error: error.to_string(),
-                });
-            }
-        };
-    //Fetching parent timestamps from DB
-    let parent_timestamp_rows =
-        match sqlx::query("SELECT  parent,child,timestamp FROM ParentTimestamps WHERE child = ?")
-            .bind(bead_id)
-            .fetch_all(&*db_connection_arc)
-            .await
-        {
-            Ok(rows) => rows,
-            Err(error) => {
-                return Err(DBErrors::TupleNotFetched {
-                    error: error.to_string(),
-                });
-            }
-        };
+    let rows = match sqlx::query(
+        "SELECT txid as txid, bead_id FROM Transactions WHERE bead_id = ? ORDER BY idx",
+    )
+    .bind(bead_id)
+    .fetch_all(&*db_connection_arc)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            return Err(DBErrors::TupleNotFetched {
+                error: error.to_string(),
+            });
+        }
+    };
+    //Fetching parent timestamps from DB, ordered by parent hash so that
+    //parent_bead_timestamps is reconstructed in the same deterministic order
+    //as the hash-sorted parents used by consensus encoding.
+    let parent_timestamp_rows = match sqlx::query(
+        "SELECT pt.timestamp AS timestamp, pb.hash AS parent_hash
+             FROM ParentTimestamps pt
+             JOIN Bead pb ON pb.id = pt.parent
+             WHERE pt.child = ?
+             ORDER BY pb.hash",
+    )
+    .bind(bead_id)
+    .fetch_all(&*db_connection_arc)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            return Err(DBErrors::TupleNotFetched {
+                error: error.to_string(),
+            });
+        }
+    };
 
     let mut parent_pairs_single: Vec<(BlockHash, Time)> = Vec::new();
     for parent_beads in parent_timestamp_rows {
         let parent_timestamp = parent_beads.get::<u32, _>("timestamp");
-        let parent_bead_id = parent_beads.get::<i64, _>("parent");
-        //Fetching parent_bead from DB
-        let parent_bead_hash_raw_bytes = match sqlx::query("SELECT  hash FROM Bead WHERE id = ?")
-            .bind(parent_bead_id)
-            .fetch_one(&*db_connection_arc)
-            .await
-        {
-            Ok(bead_tuple) => bead_tuple.get::<Vec<u8>, _>("hash"),
-            Err(error) => {
-                return Err(DBErrors::TupleNotFetched {
-                    error: error.to_string(),
-                });
-            }
-        };
+        //The parent hash comes from the join above, so no per-parent lookup is needed.
+        let parent_bead_hash_raw_bytes = parent_beads.get::<Vec<u8>, _>("parent_hash");
         let parent_blockhash = match parent_bead_hash_raw_bytes.try_into() {
             Ok(arr) => BlockHash::from_byte_array(arr),
             Err(_) => {
@@ -982,5 +989,50 @@ pub mod test {
                 bead_hash
             );
         }
+    }
+    #[tokio::test]
+    async fn test_transaction_order_roundtrip() {
+        let (handler, _db_tx) = DBHandler::new_in_memory(PoolNetwork::Cpunet).await.unwrap();
+        let test_pool = handler.db_connection_pool.clone();
+
+        // Genesis-like bead (no parents) with transactions in a non-sorted order.
+        let mut bead = emit_bead();
+        bead.committed_metadata.transaction_ids.0.clear();
+        let txids: Vec<Txid> = [4u8, 2, 1, 3]
+            .iter()
+            .map(|b| Txid::from_byte_array([*b; 32]))
+            .collect();
+        for txid in &txids {
+            bead.committed_metadata.transaction_ids.0.push(*txid);
+        }
+
+        let data = BeadInsertData {
+            bead: bead.clone(),
+            bead_id: 0,
+            parent_refs: vec![],
+        };
+
+        handler
+            .insert_beads_batch(vec![data], vec![])
+            .await
+            .expect("Batch insertion failed");
+
+        // Batch read path (used when serving beads during IBD).
+        let batch = fetch_beads_in_batch(&test_pool, 100).await.unwrap();
+        assert_eq!(batch.len(), 1, "expected exactly one persisted bead");
+        assert_eq!(
+            batch[0].committed_metadata.transaction_ids.0, txids,
+            "batch read must preserve transaction order"
+        );
+
+        // Single-bead read path.
+        let single = fetch_bead_by_bead_hash(&test_pool, bead.block_header.block_hash())
+            .await
+            .unwrap()
+            .expect("bead not found");
+        assert_eq!(
+            single.committed_metadata.transaction_ids.0, txids,
+            "single-bead read must preserve transaction order"
+        );
     }
 }
