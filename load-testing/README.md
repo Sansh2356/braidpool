@@ -73,7 +73,7 @@ Simulates real miners through the complete stratum protocol:
 3. `mining.configure` — negotiate version-rolling
 4. `mining.authorize` — authenticate worker
 5. Wait for `mining.notify` — receive block template
-6. `mining.submit` loop — submit shares with random nonces
+6. `mining.submit` loop — submit shares with random nonces (and rolled version bits, since version-rolling is negotiated in step 3 the server requires the 6th `version_bits` param)
 
 Each thread uses a unique worker name from `data/miner-credentials.csv`.
 
@@ -83,7 +83,7 @@ Each thread uses a unique worker name from `data/miner-credentials.csv`.
 |----------|---------|-------------|
 | `STRATUM_HOST` | `localhost` | Stratum server host |
 | `STRATUM_PORT` | `3333` | Stratum server port |
-| `NUM_MINERS` | `100` | Concurrent miner threads |
+| `NUM_MINERS` | `100` | Concurrent miner threads (max 1000 unique workers — the CSV recycles beyond that, reusing worker names) |
 | `RAMP_UP_SECONDS` | `30` | Thread ramp-up period |
 | `TEST_DURATION_SECONDS` | `300` | Submit loop duration per miner |
 | `SUBMIT_INTERVAL_MS` | `1000` | Delay between submits per miner |
@@ -153,15 +153,23 @@ load-testing/
 
 The load test measures:
 
-| Metric | Target | Source |
-|--------|--------|--------|
-| Subscribe latency (p95) | < 50ms | JMeter aggregate |
-| Authorize latency (p95) | < 50ms | JMeter aggregate |
-| Time to first mining.notify | < 2s | Groovy sub-result |
-| Submit throughput | baseline | JMeter aggregate |
-| Submit latency (p95) | < 100ms | JMeter aggregate |
+Each protocol phase is recorded as a JMeter sub-result, so the aggregate
+report and HTML dashboard contain one row per phase alongside the parent
+`Stratum Miner Session` row:
+
+| Metric | Target | Source (aggregate row) |
+|--------|--------|------------------------|
+| Subscribe latency (p95) | < 50ms | `stratum.subscribe` |
+| Authorize latency (p95) | < 50ms | `stratum.authorize` |
+| Time to first mining.notify | < 2s | `stratum.first_notify` |
+| Submit throughput | baseline | `stratum.submit` (samples/s) |
+| Submit latency (p95) | < 100ms | `stratum.submit` |
 | Connection rate | > 100/s | Connection stress test |
 | Error rate | < 1% | JMeter aggregate |
+
+A `stratum.submit` sub-result is failed only when the server sends no
+response — rejected shares (expected with random nonces) count as successful
+samples, with the accepted/rejected split reported per session.
 
 ## How It Works
 
@@ -177,5 +185,5 @@ bitcoind (regtest) ──IPC──> braidpool node ──TCP──> miners (JMet
 
 - `generate-blocks.sh` creates blocks every 10s, triggering new templates via IPC
 - The braidpool node receives templates and broadcasts `mining.notify` to all connected miners
-- JMeter threads submit shares with random nonces (these fail PoW but exercise the full validation path)
-- Share rejections are expected and counted — we're measuring processing throughput, not mining success
+- JMeter threads submit shares with random nonces and masked version bits (these fail PoW but exercise the full validation path, including BIP310 version-rolling)
+- Share rejections are expected and counted — we're measuring processing throughput, not mining success. Each session's report breaks submits into accepted / rejected / no-response and records the first rejection reason, so protocol-level failures are distinguishable from expected PoW rejections

@@ -1,4 +1,3 @@
-#!/usr/bin/env bash
 # Setup regtest environment for stratum load testing
 # Starts bitcoind in regtest mode, generates initial blocks, starts braidpool node
 set -euo pipefail
@@ -28,7 +27,6 @@ echo "Network:          $NETWORK"
 echo "Stratum port:     $STRATUM_PORT"
 echo ""
 
-# ── Step 1: Start bitcoind ────────────────────────────────────────────────────
 echo "[1/6] Starting bitcoind in regtest mode..."
 
 # Clean up stale socket if present
@@ -49,7 +47,6 @@ bitcoind \
 
 echo "  bitcoind started (datadir: $BITCOIN_DATADIR)"
 
-# ── Step 2: Wait for bitcoind to be ready ─────────────────────────────────────
 echo "[2/6] Waiting for bitcoind RPC to be ready..."
 
 MAX_WAIT=60
@@ -64,7 +61,6 @@ while ! bitcoin-cli -regtest -datadir="$BITCOIN_DATADIR" -rpcuser="$RPC_USER" -r
 done
 echo "  bitcoind ready (waited ${WAITED}s)"
 
-# ── Step 3: Create wallet and generate initial blocks ─────────────────────────
 echo "[3/6] Creating wallet and generating initial blocks..."
 
 # Create wallet (ignore error if already exists)
@@ -87,7 +83,6 @@ echo "  Mining address: $MINING_ADDRESS"
 # Save mining address for generate-blocks.sh
 echo "$MINING_ADDRESS" > "$PIDFILE_DIR/mining-address.txt"
 
-# ── Step 4: Start braidpool node ──────────────────────────────────────────────
 echo "[4/6] Starting braidpool node..."
 
 BRAIDPOOL_BIN="$PROJECT_ROOT/target/release/braidpool-node"
@@ -100,6 +95,7 @@ if [ ! -f "$BRAIDPOOL_BIN" ]; then
 fi
 
 BRAIDPOOL_LOG="$LOAD_TEST_DIR/reports/braidpool-node.log"
+mkdir -p "$LOAD_TEST_DIR/reports"
 "$BRAIDPOOL_BIN" \
     --ipc-socket "$IPC_SOCKET" \
     --network "$NETWORK" \
@@ -112,7 +108,6 @@ BRAIDPOOL_PID=$!
 echo "$BRAIDPOOL_PID" > "$PIDFILE_DIR/braidpool.pid"
 echo "  braidpool-node started (PID: $BRAIDPOOL_PID, log: $BRAIDPOOL_LOG)"
 
-# ── Step 5: Wait for stratum server ──────────────────────────────────────────
 echo "[5/6] Waiting for stratum server on port $STRATUM_PORT..."
 
 MAX_WAIT=30
@@ -128,7 +123,6 @@ while ! nc -z localhost "$STRATUM_PORT" 2>/dev/null; do
 done
 echo "  Stratum server ready on port $STRATUM_PORT (waited ${WAITED}s)"
 
-# ── Step 6: Start background block generation ─────────────────────────────────
 echo "[6/6] Starting background block generation..."
 
 "$SCRIPT_DIR/generate-blocks.sh" &

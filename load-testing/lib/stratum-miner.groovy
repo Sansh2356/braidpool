@@ -1,5 +1,7 @@
 import groovy.json.JsonSlurper
 import groovy.json.JsonOutput
+// Aliased so the class import doesn't shadow the pre-bound SampleResult (the parent sample)
+import org.apache.jmeter.samplers.SampleResult as JMSampleResult
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 def host = vars.get("STRATUM_HOST") ?: "localhost"
@@ -15,6 +17,7 @@ def extranonce2Size = 4
 def currentJobId = null
 def currentNtime = null
 def requestId = 0
+def versionRollingMask = null  // hex mask negotiated via mining.configure (null = not negotiated)
 def responseLog = new StringBuilder()
 
 // ─── Statistics ──────────────────────────────────────────────────────────────
@@ -23,8 +26,9 @@ def stats = [
     subscribe: [count: 0, success: 0, failed: 0, latencyMs: 0L],
     configure: [count: 0, success: 0, failed: 0, latencyMs: 0L],
     authorize: [count: 0, success: 0, failed: 0, latencyMs: 0L],
-    submit: [count: 0, success: 0, failed: 0, latencies: []]
+    submit: [count: 0, success: 0, failed: 0, accepted: 0, rejected: 0, latencies: []]
 ]
+def firstRejectReason = null
 
 // Server notification statistics
 def notificationStats = [
@@ -65,6 +69,21 @@ def readOneLine = { reader ->
     } catch (java.net.SocketTimeoutException e) {
         return null
     }
+}
+
+/**
+ * Record a protocol phase as a JMeter sub-result so per-phase latency shows up
+ * as its own row (label "stratum.<phase>") in aggregate reports and the HTML
+ * dashboard, instead of being buried inside the whole-session sample.
+ */
+def addPhaseResult = { String label, long startMs, long durationMs, boolean ok, String message ->
+    def sub = new JMSampleResult()
+    sub.setSampleLabel(label)
+    sub.setStampAndTime(startMs, durationMs)
+    sub.setSuccessful(ok)
+    sub.setResponseCode(ok ? "200" : "500")
+    sub.setResponseMessage(message ?: "")
+    SampleResult.addSubResult(sub, false)  // false = keep our label, don't renumber
 }
 
 // Notification handler — updates currentJobId/currentNtime and tracks stats
@@ -150,6 +169,7 @@ try {
 
     if (subResp == null || subResp["result"] == null) {
         stats.subscribe.failed++
+        addPhaseResult("stratum.subscribe", subStartTime, subLatency, false, "no response or null result")
         SampleResult.sampleEnd()
         SampleResult.setSuccessful(false)
         SampleResult.setResponseData("Subscribe failed: no response or null result", "UTF-8")
@@ -157,6 +177,7 @@ try {
         return
     }
     stats.subscribe.success++
+    addPhaseResult("stratum.subscribe", subStartTime, subLatency, true, "ok")
 
     def subResultData = subResp["result"]
     if (subResultData instanceof List && subResultData.size() >= 3) {
@@ -182,11 +203,19 @@ try {
     
     if (cfgResp != null) {
         stats.configure.success++
+        // Once version-rolling is negotiated, the server REQUIRES a 6th
+        // version_bits param on every mining.submit — capture the mask.
+        def cfgResult = cfgResp["result"]
+        if (cfgResult instanceof Map && cfgResult["version-rolling"] == true) {
+            versionRollingMask = cfgResult["version-rolling.mask"] as String
+        }
+        addPhaseResult("stratum.configure", cfgStartTime, cfgLatency, true, "ok")
         responseLog.append("Configured: ${JsonOutput.toJson(cfgResp)} (${cfgLatency}ms)\n")
-        log.info("CONFIGURED [${workerName}]: ${cfgResp} latency=${cfgLatency}ms")
+        log.info("CONFIGURED [${workerName}]: ${cfgResp} mask=${versionRollingMask} latency=${cfgLatency}ms")
     } else {
         // Configure is optional - treat no response as success for stats
         stats.configure.success++
+        addPhaseResult("stratum.configure", cfgStartTime, cfgLatency, true, "no response (optional)")
         responseLog.append("Configure: no response (optional, continuing) (${cfgLatency}ms)\n")
         log.info("CONFIGURE [${workerName}]: no response, continuing latency=${cfgLatency}ms")
     }
@@ -203,6 +232,8 @@ try {
 
     if (authResp == null || authResp["result"] != true) {
         stats.authorize.failed++
+        addPhaseResult("stratum.authorize", authStartTime, authLatency, false,
+            authResp != null ? "rejected" : "no response")
         SampleResult.sampleEnd()
         SampleResult.setSuccessful(false)
         def authMsg = authResp != null ? JsonOutput.toJson(authResp) : "no response"
@@ -211,12 +242,14 @@ try {
         return
     }
     stats.authorize.success++
+    addPhaseResult("stratum.authorize", authStartTime, authLatency, true, "ok")
     responseLog.append("Authorized: worker=${workerName} (${authLatency}ms)\n")
     log.info("AUTHORIZED [${workerName}] latency=${authLatency}ms")
 
     // ── Step 5: Wait for first mining.notify ─────────────────────────────────
     log.info("WAITING [${workerName}]: waiting for mining.notify...")
-    def jobDeadline = System.currentTimeMillis() + 60000  // 60s max wait
+    def waitStartTime = System.currentTimeMillis()
+    def jobDeadline = waitStartTime + 60000  // 60s max wait
     while (currentJobId == null && System.currentTimeMillis() < jobDeadline) {
         def msg = readOneLine(reader)
         if (msg == null) continue
@@ -224,15 +257,18 @@ try {
             handleNotification(msg)
         }
     }
+    def firstNotifyLatency = System.currentTimeMillis() - waitStartTime
 
     if (currentJobId == null) {
+        addPhaseResult("stratum.first_notify", waitStartTime, firstNotifyLatency, false, "timeout (60s)")
         SampleResult.sampleEnd()
         SampleResult.setSuccessful(false)
         SampleResult.setResponseData("Timeout waiting for mining.notify (60s)", "UTF-8")
         SampleResult.setResponseCode("500")
         return
     }
-    responseLog.append("First job received: job_id=${currentJobId}\n")
+    addPhaseResult("stratum.first_notify", waitStartTime, firstNotifyLatency, true, "job_id=${currentJobId}")
+    responseLog.append("First job received: job_id=${currentJobId} (${firstNotifyLatency}ms after authorize)\n")
 
     // ── Step 6: Submit loop ──────────────────────────────────────────────────
     def sessionEnd = System.currentTimeMillis() + testDurationMs
@@ -262,11 +298,20 @@ try {
         def ntime = currentNtime ?: String.format("%08x", (long)(System.currentTimeMillis() / 1000))
         def nonce = randomHex(4)
 
+        def submitParams = [workerName, currentJobId, extranonce2, ntime, nonce]
+        if (versionRollingMask != null) {
+            // Random bits ANDed with the mask satisfy the server's BIP310
+            // precondition (version_bits & !mask == 0)
+            def maskInt = (int) Long.parseLong(versionRollingMask, 16)
+            def versionBits = new Random().nextInt() & maskInt
+            submitParams.add(String.format("%08x", versionBits))
+        }
+
         def submitStartTime = System.currentTimeMillis()
         sendLine(writer, [
             id: submitId,
             method: "mining.submit",
-            params: [workerName, currentJobId, extranonce2, ntime, nonce]
+            params: submitParams
         ])
 
         // Longer timeout to wait for submit response
@@ -280,11 +325,27 @@ try {
         
         if (submitResp != null) {
             stats.submit.success++
+            // Accepted = result:true; anything else (error, result:false/null) is
+            // a rejection — expected for random nonces failing PoW, but the
+            // reason is tracked so protocol-level failures are visible too.
+            if (submitResp["result"] == true) {
+                stats.submit.accepted++
+            } else {
+                stats.submit.rejected++
+                if (firstRejectReason == null) {
+                    firstRejectReason = JsonOutput.toJson(submitResp["error"] ?: submitResp)
+                }
+            }
             log.info("SUBMIT [${workerName}]: response=${submitResp} latency=${submitLatency}ms")
         } else {
             stats.submit.failed++
             log.warn("SUBMIT [${workerName}]: no response (timeout) latency=${submitLatency}ms")
         }
+        // Rejections are expected (random nonces fail PoW) — only a missing
+        // response marks the sub-result as failed
+        def submitOutcome = submitResp == null ? "timeout"
+            : (submitResp["result"] == true ? "accepted" : "rejected")
+        addPhaseResult("stratum.submit", submitStartTime, submitLatency, submitResp != null, submitOutcome)
 
         // Throttle between submits
         if (submitIntervalMs > 0) {
@@ -336,6 +397,12 @@ try {
     responseLog.append("\nSubmit Latency Distribution:\n")
     responseLog.append(String.format("  min: %dms | p50: %dms | p95: %dms | p99: %dms | max: %dms\n",
         submitMinLatency, submitP50Latency, submitP95Latency, submitP99Latency, submitMaxLatency))
+
+    responseLog.append("\nSubmit Outcomes:\n")
+    responseLog.append("  accepted: ${stats.submit.accepted} | rejected: ${stats.submit.rejected} | no response: ${stats.submit.failed}\n")
+    if (firstRejectReason != null) {
+        responseLog.append("  first rejection reason: ${firstRejectReason}\n")
+    }
     
     responseLog.append("\n┌─────────────────────┬───────┬──────────────────────────────────────────────┐\n")
     responseLog.append("│ Notification Type   │ Count │ Details                                      │\n")
@@ -368,6 +435,8 @@ try {
     vars.put("STAT_SUBMIT_COUNT", stats.submit.count.toString())
     vars.put("STAT_SUBMIT_SUCCESS", stats.submit.success.toString())
     vars.put("STAT_SUBMIT_FAILED", stats.submit.failed.toString())
+    vars.put("STAT_SUBMIT_ACCEPTED", stats.submit.accepted.toString())
+    vars.put("STAT_SUBMIT_REJECTED", stats.submit.rejected.toString())
     vars.put("STAT_SUBMIT_LATENCY_MIN_MS", submitMinLatency.toString())
     vars.put("STAT_SUBMIT_LATENCY_MAX_MS", submitMaxLatency.toString())
     vars.put("STAT_SUBMIT_LATENCY_AVG_MS", submitAvgLatency.toString())

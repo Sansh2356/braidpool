@@ -26,6 +26,14 @@ if ! command -v jmeter &>/dev/null; then
     exit 1
 fi
 
+# Always tear down the test environment, even if setup or JMeter fails
+cleanup() {
+    echo ""
+    echo "[4/4] Tearing down..."
+    "$SCRIPT_DIR/teardown.sh"
+}
+trap cleanup EXIT
+
 # Prepare output directories
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 RESULTS_FILE="$REPORTS_DIR/${TEST_PLAN}-${TIMESTAMP}.jtl"
@@ -52,14 +60,14 @@ sleep 5
 echo "[2/4] Running JMeter test: $TEST_PLAN"
 echo ""
 
+# || so a JMeter failure doesn't trip `set -e` before we can report and tear down
+JMETER_EXIT=0
 jmeter -n \
     -t "$JMX_FILE" \
     -l "$RESULTS_FILE" \
     -Jtest.data.dir="$LOAD_TEST_DIR/data" \
     -Jtest.lib.dir="$LOAD_TEST_DIR/lib" \
-    -e -o "$DASHBOARD_DIR"
-
-JMETER_EXIT=$?
+    -e -o "$DASHBOARD_DIR" || JMETER_EXIT=$?
 
 echo ""
 if [ "$JMETER_EXIT" -eq 0 ]; then
@@ -94,10 +102,7 @@ echo ""
 echo "  Full report:    $DASHBOARD_DIR/index.html"
 echo "  Raw results:    $RESULTS_FILE"
 
-# ── Step 4: Teardown ─────────────────────────────────────────────────────────
-echo ""
-echo "[4/4] Tearing down..."
-"$SCRIPT_DIR/teardown.sh"
-
+# ── Step 4: Teardown runs via the EXIT trap ──────────────────────────────────
 echo ""
 echo "=== Done ==="
+exit "$JMETER_EXIT"

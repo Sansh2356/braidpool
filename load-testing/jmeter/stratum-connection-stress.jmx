@@ -9,22 +9,22 @@
         <collectionProp name="Arguments.arguments">
           <elementProp name="STRATUM_HOST" elementType="Argument">
             <stringProp name="Argument.name">STRATUM_HOST</stringProp>
-            <stringProp name="Argument.value">localhost</stringProp>
+            <stringProp name="Argument.value">${__P(STRATUM_HOST,localhost)}</stringProp>
             <stringProp name="Argument.metadata">=</stringProp>
           </elementProp>
           <elementProp name="STRATUM_PORT" elementType="Argument">
             <stringProp name="Argument.name">STRATUM_PORT</stringProp>
-            <stringProp name="Argument.value">3333</stringProp>
+            <stringProp name="Argument.value">${__P(STRATUM_PORT,3333)}</stringProp>
             <stringProp name="Argument.metadata">=</stringProp>
           </elementProp>
           <elementProp name="NUM_CONNECTIONS" elementType="Argument">
             <stringProp name="Argument.name">NUM_CONNECTIONS</stringProp>
-            <stringProp name="Argument.value">500</stringProp>
+            <stringProp name="Argument.value">${__P(NUM_CONNECTIONS,500)}</stringProp>
             <stringProp name="Argument.metadata">=</stringProp>
           </elementProp>
           <elementProp name="RAMP_UP_SECONDS" elementType="Argument">
             <stringProp name="Argument.name">RAMP_UP_SECONDS</stringProp>
-            <stringProp name="Argument.value">10</stringProp>
+            <stringProp name="Argument.value">${__P(RAMP_UP_SECONDS,10)}</stringProp>
             <stringProp name="Argument.metadata">=</stringProp>
           </elementProp>
         </collectionProp>
