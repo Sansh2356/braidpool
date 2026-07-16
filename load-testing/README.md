@@ -9,7 +9,15 @@ JMeter-based load tests for the braidpool stratum server. Tests concurrent miner
 3. **Apache JMeter** 5.6+ — [download](https://jmeter.apache.org/download_jmeter.cgi)
 4. **netcat** (`nc`) for port-ready checks
 
-Ensure `bitcoin-cli`, `bitcoind`, and `jmeter` are in your `PATH`.
+Binaries are looked up in `PATH` by default. If yours live elsewhere, point
+the scripts at them via environment variables:
+
+```bash
+export BITCOIN_NODE_BIN=$HOME/bitcoin/build/bin/bitcoin-node  # or bitcoind
+export BITCOIN_CLI_BIN=$HOME/bitcoin/build/bin/bitcoin-cli
+export BRAIDPOOL_BIN=$HOME/braidpool/target/release/node      # default: target/release, then target/debug
+export JMETER_BIN=/opt/jmeter/bin/jmeter
+```
 
 ## Quick Start
 
@@ -128,6 +136,10 @@ Override defaults for the setup/teardown scripts:
 | `STRATUM_PORT` | `3333` | Stratum server port |
 | `BLOCK_INTERVAL` | `10` | Seconds between generated blocks |
 | `NETWORK` | `regtest` | Bitcoin network |
+| `BITCOIN_NODE_BIN` | `bitcoin-node`/`bitcoind` from PATH | Bitcoin Core daemon binary (multiprocess, v28+) |
+| `BITCOIN_CLI_BIN` | `bitcoin-cli` from PATH | Bitcoin Core CLI binary |
+| `BRAIDPOOL_BIN` | `target/release/node`, then `target/debug/node` | Braidpool node binary |
+| `JMETER_BIN` | `jmeter` from PATH | JMeter launcher (run-tests.sh) |
 
 ## Directory Structure
 

@@ -18,11 +18,12 @@ if [ ! -f "$JMX_FILE" ]; then
     exit 1
 fi
 
-# Check JMeter is installed
-if ! command -v jmeter &>/dev/null; then
+# Check JMeter is installed — override via JMETER_BIN when not in PATH
+JMETER_BIN="${JMETER_BIN:-$(command -v jmeter || true)}"
+if [ -z "$JMETER_BIN" ] || ! command -v "$JMETER_BIN" &>/dev/null; then
     echo "ERROR: jmeter not found in PATH."
     echo "Install: https://jmeter.apache.org/download_jmeter.cgi"
-    echo "Or set JMETER_HOME and add \$JMETER_HOME/bin to PATH"
+    echo "Or set JMETER_BIN, e.g.: export JMETER_BIN=/opt/jmeter/bin/jmeter"
     exit 1
 fi
 
@@ -62,7 +63,7 @@ echo ""
 
 # || so a JMeter failure doesn't trip `set -e` before we can report and tear down
 JMETER_EXIT=0
-jmeter -n \
+"$JMETER_BIN" -n \
     -t "$JMX_FILE" \
     -l "$RESULTS_FILE" \
     -Jtest.data.dir="$LOAD_TEST_DIR/data" \

@@ -11,20 +11,20 @@ RPC_USER="${RPC_USER:-loadtest}"
 RPC_PASS="${RPC_PASS:-loadtest}"
 RPC_PORT="${BITCOIN_RPC_PORT:-18443}"
 
+BITCOIN_CLI_BIN="${BITCOIN_CLI_BIN:-$(command -v bitcoin-cli || true)}"
+
 echo "=== Braidpool Load Test Teardown ==="
 
-# ── Stop block generator ──────────────────────────────────────────────────────
 if [ -f "$PIDFILE_DIR/generate-blocks.pid" ]; then
     GEN_PID=$(cat "$PIDFILE_DIR/generate-blocks.pid")
     if kill -0 "$GEN_PID" 2>/dev/null; then
         echo "Stopping block generator (PID: $GEN_PID)..."
-        kill "$GEN_PID" 2>/dev/null || true
+        kill -9 "$GEN_PID" 2>/dev/null || true
         wait "$GEN_PID" 2>/dev/null || true
     fi
     rm -f "$PIDFILE_DIR/generate-blocks.pid"
 fi
 
-# ── Stop braidpool node ──────────────────────────────────────────────────────
 if [ -f "$PIDFILE_DIR/braidpool.pid" ]; then
     BP_PID=$(cat "$PIDFILE_DIR/braidpool.pid")
     if kill -0 "$BP_PID" 2>/dev/null; then
@@ -37,25 +37,27 @@ if [ -f "$PIDFILE_DIR/braidpool.pid" ]; then
     rm -f "$PIDFILE_DIR/braidpool.pid"
 fi
 
-# ── Stop bitcoind ─────────────────────────────────────────────────────────────
-echo "Stopping bitcoind..."
-bitcoin-cli -regtest -datadir="$BITCOIN_DATADIR" -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" -rpcport="$RPC_PORT" \
-    stop 2>/dev/null || true
+echo "Stopping bitcoin-node..."
+if [ -n "$BITCOIN_CLI_BIN" ]; then
+    "$BITCOIN_CLI_BIN" -regtest -datadir="$BITCOIN_DATADIR" -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" -rpcport="$RPC_PORT" \
+        stop 2>/dev/null || true
+else
+    echo "  bitcoin-cli not found (set BITCOIN_CLI_BIN); skipping graceful stop"
+fi
 
-# Wait for bitcoind to stop
+# Wait for bitcoin-node to stop
 MAX_WAIT=15
 WAITED=0
-while pgrep -f "bitcoind.*$BITCOIN_DATADIR" > /dev/null 2>&1; do
+while pgrep -f "bitcoin-node.*$BITCOIN_DATADIR" > /dev/null 2>&1; do
     sleep 1
     WAITED=$((WAITED + 1))
     if [ "$WAITED" -ge "$MAX_WAIT" ]; then
-        echo "  WARNING: bitcoind did not stop gracefully, force killing..."
-        pkill -9 -f "bitcoind.*$BITCOIN_DATADIR" 2>/dev/null || true
+        echo "  WARNING: bitcoin-node did not stop gracefully, force killing..."
+        pkill -9 -f "bitcoin-node.*$BITCOIN_DATADIR" 2>/dev/null || true
         break
     fi
 done
 
-# ── Clean up ──────────────────────────────────────────────────────────────────
 rm -f "$PIDFILE_DIR/mining-address.txt"
 rm -f /tmp/bitcoin-loadtest-regtest.sock
 

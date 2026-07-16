@@ -1,5 +1,5 @@
 # Setup regtest environment for stratum load testing
-# Starts bitcoind in regtest mode, generates initial blocks, starts braidpool node
+# Starts bitcoin-node in regtest mode, generates initial blocks, starts braidpool node
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,6 +17,21 @@ BRAIDPOOL_RPC_PORT="${BRAIDPOOL_RPC_PORT:-6682}"
 NETWORK="${NETWORK:-regtest}"
 PIDFILE_DIR="${LOAD_TEST_DIR}/.pids"
 
+# Binary locations — override via environment variables when not in PATH,
+BITCOIN_NODE_BIN="${BITCOIN_NODE_BIN:-$(command -v bitcoin-node || command -v bitcoind || true)}"
+BITCOIN_CLI_BIN="${BITCOIN_CLI_BIN:-$(command -v bitcoin-cli || true)}"
+
+if [ -z "$BITCOIN_NODE_BIN" ] || ! command -v "$BITCOIN_NODE_BIN" &>/dev/null; then
+    echo "ERROR: bitcoin-node/bitcoind binary not found (need a v28+ multiprocess build with -ipcbind support)."
+    echo "Set BITCOIN_NODE_BIN, e.g.: export BITCOIN_NODE_BIN=\$HOME/bitcoin/build/bin/bitcoin-node"
+    exit 1
+fi
+if [ -z "$BITCOIN_CLI_BIN" ] || ! command -v "$BITCOIN_CLI_BIN" &>/dev/null; then
+    echo "ERROR: bitcoin-cli binary not found."
+    echo "Set BITCOIN_CLI_BIN, e.g.: export BITCOIN_CLI_BIN=\$HOME/bitcoin/build/bin/bitcoin-cli"
+    exit 1
+fi
+
 mkdir -p "$PIDFILE_DIR"
 mkdir -p "$BITCOIN_DATADIR"
 
@@ -27,12 +42,12 @@ echo "Network:          $NETWORK"
 echo "Stratum port:     $STRATUM_PORT"
 echo ""
 
-echo "[1/6] Starting bitcoind in regtest mode..."
+echo "[1/6] Starting bitcoin-node in regtest mode..."
 
 # Clean up stale socket if present
 rm -f "$IPC_SOCKET"
 
-bitcoind \
+"$BITCOIN_NODE_BIN" \
     -regtest \
     -server \
     -daemon \
@@ -42,40 +57,44 @@ bitcoind \
     -rpcport="$RPC_PORT" \
     -rpcallowip=0.0.0.0/0 \
     -fallbackfee=0.0001 \
-    -ipcbind="unix://$IPC_SOCKET" \
+    -ipcbind="unix:/$IPC_SOCKET" \
     -txindex=1
 
-echo "  bitcoind started (datadir: $BITCOIN_DATADIR)"
+echo "  bitcoin-node started (datadir: $BITCOIN_DATADIR)"
 
-echo "[2/6] Waiting for bitcoind RPC to be ready..."
+echo "[2/6] Waiting for bitcoin-node RPC to be ready..."
 
 MAX_WAIT=60
 WAITED=0
-while ! bitcoin-cli -regtest -datadir="$BITCOIN_DATADIR" -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" -rpcport="$RPC_PORT" getblockchaininfo &>/dev/null; do
+while ! "$BITCOIN_CLI_BIN" -regtest -datadir="$BITCOIN_DATADIR" -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" -rpcport="$RPC_PORT" getblockchaininfo &>/dev/null; do
     sleep 1
     WAITED=$((WAITED + 1))
     if [ "$WAITED" -ge "$MAX_WAIT" ]; then
-        echo "  ERROR: bitcoind did not become ready within ${MAX_WAIT}s"
+        echo "  ERROR: bitcoin-node did not become ready within ${MAX_WAIT}s"
         exit 1
     fi
 done
-echo "  bitcoind ready (waited ${WAITED}s)"
+echo "  bitcoin-node ready (waited ${WAITED}s)"
 
 echo "[3/6] Creating wallet and generating initial blocks..."
 
-# Create wallet (ignore error if already exists)
-bitcoin-cli -regtest -datadir="$BITCOIN_DATADIR" -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" -rpcport="$RPC_PORT" \
-    createwallet "loadtest" 2>/dev/null || true
+# Create wallet; if it already exists from a previous run, load it instead
+# (loadwallet also fails harmlessly if the wallet was auto-loaded at startup)
+if ! "$BITCOIN_CLI_BIN" -regtest -datadir="$BITCOIN_DATADIR" -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" -rpcport="$RPC_PORT" \
+    createwallet "loadtest" 2>/dev/null; then
+    "$BITCOIN_CLI_BIN" -regtest -datadir="$BITCOIN_DATADIR" -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" -rpcport="$RPC_PORT" \
+        loadwallet "loadtest" 2>/dev/null || true
+fi
 
 # Get a new address for mining rewards
-MINING_ADDRESS=$(bitcoin-cli -regtest -datadir="$BITCOIN_DATADIR" -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" -rpcport="$RPC_PORT" \
+MINING_ADDRESS=$("$BITCOIN_CLI_BIN" -regtest -datadir="$BITCOIN_DATADIR" -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" -rpcport="$RPC_PORT" \
     getnewaddress "" "bech32")
 
 # Generate 101 blocks to have mature coinbase
-bitcoin-cli -regtest -datadir="$BITCOIN_DATADIR" -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" -rpcport="$RPC_PORT" \
+"$BITCOIN_CLI_BIN" -regtest -datadir="$BITCOIN_DATADIR" -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" -rpcport="$RPC_PORT" \
     generatetoaddress 101 "$MINING_ADDRESS" > /dev/null
 
-BLOCK_COUNT=$(bitcoin-cli -regtest -datadir="$BITCOIN_DATADIR" -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" -rpcport="$RPC_PORT" \
+BLOCK_COUNT=$("$BITCOIN_CLI_BIN" -regtest -datadir="$BITCOIN_DATADIR" -rpcuser="$RPC_USER" -rpcpassword="$RPC_PASS" -rpcport="$RPC_PORT" \
     getblockcount)
 echo "  Wallet created, ${BLOCK_COUNT} blocks generated"
 echo "  Mining address: $MINING_ADDRESS"
@@ -85,12 +104,16 @@ echo "$MINING_ADDRESS" > "$PIDFILE_DIR/mining-address.txt"
 
 echo "[4/6] Starting braidpool node..."
 
-BRAIDPOOL_BIN="$PROJECT_ROOT/target/release/braidpool-node"
-if [ ! -f "$BRAIDPOOL_BIN" ]; then
-    BRAIDPOOL_BIN="$PROJECT_ROOT/target/debug/braidpool-node"
+# Override via BRAIDPOOL_BIN; otherwise use the release build, falling back to debug
+if [ -z "${BRAIDPOOL_BIN:-}" ]; then
+    BRAIDPOOL_BIN="$PROJECT_ROOT/target/release/node"
+    if [ ! -f "$BRAIDPOOL_BIN" ]; then
+        BRAIDPOOL_BIN="$PROJECT_ROOT/target/debug/node"
+    fi
 fi
 if [ ! -f "$BRAIDPOOL_BIN" ]; then
-    echo "  ERROR: braidpool-node binary not found. Run 'cargo build --release' from node/"
+    echo "  ERROR: braidpool node binary not found: $BRAIDPOOL_BIN"
+    echo "  Run 'cargo build --release' from node/, or set BRAIDPOOL_BIN to the binary path"
     exit 1
 fi
 

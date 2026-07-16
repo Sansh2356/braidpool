@@ -3,7 +3,6 @@ import groovy.json.JsonOutput
 // Aliased so the class import doesn't shadow the pre-bound SampleResult (the parent sample)
 import org.apache.jmeter.samplers.SampleResult as JMSampleResult
 
-// ─── Configuration ───────────────────────────────────────────────────────────
 def host = vars.get("STRATUM_HOST") ?: "localhost"
 def port = (vars.get("STRATUM_PORT") ?: "3333") as int
 def workerName = vars.get("WORKER_NAME") ?: "miner0001.worker1"
@@ -11,7 +10,6 @@ def testDurationMs = ((vars.get("TEST_DURATION_SECONDS") ?: "300") as long) * 10
 def submitIntervalMs = (vars.get("SUBMIT_INTERVAL_MS") ?: "1000") as long
 def socketTimeoutMs = 30000  // 30s read timeout for server pushes
 
-// ─── State ───────────────────────────────────────────────────────────────────
 def extranonce1 = ""
 def extranonce2Size = 4
 def currentJobId = null
@@ -20,7 +18,6 @@ def requestId = 0
 def versionRollingMask = null  // hex mask negotiated via mining.configure (null = not negotiated)
 def responseLog = new StringBuilder()
 
-// ─── Statistics ──────────────────────────────────────────────────────────────
 // Per-request type statistics
 def stats = [
     subscribe: [count: 0, success: 0, failed: 0, latencyMs: 0L],
@@ -39,7 +36,6 @@ def notificationStats = [
     difficulties: []
 ]
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 def nextId = { ++requestId }
 
@@ -138,7 +134,6 @@ def readResponseById = { reader, int expectedId ->
     return null
 }
 
-// ─── Main Script (uses pre-bound SampleResult) ──────────────────────────────
 
 SampleResult.setSampleLabel("Stratum Miner Session - ${workerName}")
 SampleResult.sampleStart()
@@ -148,7 +143,6 @@ def writer = null
 def reader = null
 
 try {
-    // ── Step 1: Connect ──────────────────────────────────────────────────────
     log.info("CONNECT [${workerName}]: ${host}:${port}")
     socket = new java.net.Socket()
     socket.connect(new java.net.InetSocketAddress(host, port), 10000)
@@ -157,7 +151,6 @@ try {
     reader = new BufferedReader(new InputStreamReader(socket.getInputStream(), "UTF-8"))
     responseLog.append("Connected to ${host}:${port}\n")
 
-    // ── Step 2: Subscribe ────────────────────────────────────────────────────
     def subId = nextId()
     def subStartTime = System.currentTimeMillis()
     sendLine(writer, [id: subId, method: "mining.subscribe", params: []])
@@ -187,7 +180,6 @@ try {
     responseLog.append("Subscribed: extranonce1=${extranonce1}, extranonce2_size=${extranonce2Size} (${subLatency}ms)\n")
     log.info("SUBSCRIBED [${workerName}]: extranonce1=${extranonce1} latency=${subLatency}ms")
 
-    // ── Step 3: Configure (version-rolling) ──────────────────────────────────
     def cfgId = nextId()
     def cfgStartTime = System.currentTimeMillis()
     sendLine(writer, [
@@ -220,7 +212,6 @@ try {
         log.info("CONFIGURE [${workerName}]: no response, continuing latency=${cfgLatency}ms")
     }
 
-    // ── Step 4: Authorize ────────────────────────────────────────────────────
     def authId = nextId()
     def authStartTime = System.currentTimeMillis()
     sendLine(writer, [id: authId, method: "mining.authorize", params: [workerName, "x"]])
@@ -246,7 +237,6 @@ try {
     responseLog.append("Authorized: worker=${workerName} (${authLatency}ms)\n")
     log.info("AUTHORIZED [${workerName}] latency=${authLatency}ms")
 
-    // ── Step 5: Wait for first mining.notify ─────────────────────────────────
     log.info("WAITING [${workerName}]: waiting for mining.notify...")
     def waitStartTime = System.currentTimeMillis()
     def jobDeadline = waitStartTime + 60000  // 60s max wait
@@ -270,7 +260,6 @@ try {
     addPhaseResult("stratum.first_notify", waitStartTime, firstNotifyLatency, true, "job_id=${currentJobId}")
     responseLog.append("First job received: job_id=${currentJobId} (${firstNotifyLatency}ms after authorize)\n")
 
-    // ── Step 6: Submit loop ──────────────────────────────────────────────────
     def sessionEnd = System.currentTimeMillis() + testDurationMs
 
     // Shorter timeout during submit loop to interleave notification reads
@@ -353,11 +342,9 @@ try {
         }
     }
 
-    // ── Session Complete ─────────────────────────────────────────────────────
     SampleResult.sampleEnd()
     SampleResult.setSuccessful(true)
     
-    // ── Compute Statistics Summary ───────────────────────────────────────────
     def submitLatencies = stats.submit.latencies
     def submitMinLatency = submitLatencies.isEmpty() ? 0 : submitLatencies.min()
     def submitMaxLatency = submitLatencies.isEmpty() ? 0 : submitLatencies.max()
