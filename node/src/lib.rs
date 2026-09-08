@@ -26,6 +26,7 @@ use crate::{
     committed_metadata::{CommittedMetadata, TimeVec, TxIdVec},
     db::BraidpoolDBTypes,
     error::{IPCtemplateError, StratumErrors},
+    payout::tracker::PayoutTracker,
     stratum::{BlockTemplate, NotifyCmd},
     uncommitted_metadata::UnCommittedMetadata,
 };
@@ -43,6 +44,7 @@ pub mod db;
 pub mod error;
 pub mod ibd_manager;
 pub mod ipc;
+pub mod payout;
 pub mod peer_manager;
 pub mod rpc_server;
 pub mod stratum;
@@ -286,12 +288,15 @@ pub struct SwarmHandler {
     braid_arc: Arc<tokio::sync::RwLock<Braid>>,
     db_command_sender: tokio::sync::mpsc::Sender<BraidpoolDBTypes>,
     dashboard_notification_sender: Arc<DashboardEvents>,
+    /// Active EDCA payout state, updated on every accepted share.
+    payout_tracker: Arc<PayoutTracker>,
 }
 impl SwarmHandler {
     pub fn new(
         braid_arc: Arc<tokio::sync::RwLock<Braid>>,
         db_command_sender: tokio::sync::mpsc::Sender<BraidpoolDBTypes>,
         dashboard_notification_sender: Arc<DashboardEvents>,
+        payout_tracker: Arc<PayoutTracker>,
     ) -> (Self, Receiver<SwarmCommand>) {
         let (swarm_stratum_bridge_tx, swarm_stratum_bridge_rx) =
             mpsc::channel::<SwarmCommand>(1024);
@@ -301,9 +306,18 @@ impl SwarmHandler {
                 braid_arc: Arc::clone(&braid_arc),
                 db_command_sender,
                 dashboard_notification_sender,
+                payout_tracker,
             },
             swarm_stratum_bridge_rx,
         )
+    }
+
+    /// Returns the shared EDCA payout state.
+    ///
+    /// The template creation path reads the settled payout roster back out
+    /// through this handle.
+    pub fn payout_tracker(&self) -> Arc<PayoutTracker> {
+        Arc::clone(&self.payout_tracker)
     }
     pub async fn propagate_valid_bead(
         &mut self,
@@ -426,6 +440,47 @@ impl SwarmHandler {
                     hash = %bead_hash,
                     "InsertBeadsBatch sent to DB thread"
                 );
+                // A successful `mining.submit` is what earns a miner their EDCA
+                // weight, so the accepted bead is recorded here - after the
+                // braid has taken it, so the rebuild below sees it in its
+                // cohort. The template reward is read straight off the
+                // candidate block's coinbase, which is the fee amplifier
+                // `A_i = B_base + F_i` of the EDCA paper's equation (3).
+                //
+                // The block came from a miner, so the sum is saturating rather
+                // than checked: `Amount`'s `Add` panics past `MAX_MONEY`, and a
+                // crafted coinbase must not be able to take the node down.
+                let template_reward = candidate_block_transactions
+                    .first()
+                    .map(|coinbase| {
+                        let satoshis = coinbase.output.iter().fold(0u64, |sum, output| {
+                            sum.saturating_add(output.value.to_sat())
+                        });
+                        bitcoin::Amount::from_sat(satoshis.min(bitcoin::Amount::MAX_MONEY.to_sat()))
+                    })
+                    .unwrap_or(bitcoin::Amount::ZERO);
+                if let Err(error) = self
+                    .payout_tracker
+                    .record_bead(&braid_data, bead_hash, template_reward)
+                    .await
+                {
+                    // A payout fault must not reject an otherwise valid share:
+                    // the bead stays in consensus and the roster is rebuilt on
+                    // the next accepted bead.
+                    error!(
+                        hash = %bead_hash,
+                        error = %error,
+                        "Failed to record bead in the EDCA payout state"
+                    );
+                } else {
+                    debug!(
+                        hash = %bead_hash,
+                        payout_address = %weak_share.committed_metadata.payout_address,
+                        template_reward = %template_reward,
+                        "Bead recorded in the EDCA payout state"
+                    );
+                }
+
                 let serialized_weak_share_bytes = bitcoin::consensus::serialize(&weak_share);
                 let res = self
                     .dashboard_notification_sender

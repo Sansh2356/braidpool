@@ -531,6 +531,22 @@ pub enum CoinbaseError {
     PushBytesError(bitcoin::script::PushBytesError),
     AddressError(AddressParseError),
     TemplateMissingOutputs,
+    /// The supplied payout roster does not sum to the template's coinbase
+    /// value. Emitting it would either burn miner rewards or produce a block
+    /// that consensus rejects for creating value out of nothing.
+    PayoutValueMismatch {
+        /// Total value carried by the supplied payout outputs, in satoshis.
+        payout_total: u64,
+        /// The template's coinbase value that had to be matched, in satoshis.
+        template_total: u64,
+    },
+    /// The payout roster would push the coinbase past its output budget.
+    TooManyPayoutOutputs {
+        /// Number of payout outputs supplied.
+        supplied: usize,
+        /// Maximum the coinbase builder accepts.
+        maximum: usize,
+    },
 }
 
 impl fmt::Display for CoinbaseError {
@@ -553,6 +569,19 @@ impl fmt::Display for CoinbaseError {
             CoinbaseError::TemplateMissingOutputs => {
                 write!(f, "Original coinbase template is missing expected outputs")
             }
+            CoinbaseError::PayoutValueMismatch {
+                payout_total,
+                template_total,
+            } => write!(
+                f,
+                "Payout outputs total {} satoshis but the template coinbase carries {}",
+                payout_total, template_total
+            ),
+            CoinbaseError::TooManyPayoutOutputs { supplied, maximum } => write!(
+                f,
+                "Coinbase accepts at most {} payout outputs, got {}",
+                maximum, supplied
+            ),
         }
     }
 }
@@ -581,3 +610,96 @@ impl fmt::Display for UnsupportedNetworkError {
     }
 }
 impl std::error::Error for UnsupportedNetworkError {}
+
+/// Errors raised by the EDCA payout algorithm.
+///
+/// Every variant is a consensus-parameter or arithmetic fault rather than an
+/// I/O failure: [`crate::payout`] is a pure function of its parameters and the
+/// DAG, so these are the only ways it can fail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EdcaError {
+    /// The retention parameter `r = numerator / denominator` was not strictly
+    /// inside `(0, 1)`, so the decay curve would not converge.
+    InvalidRetention {
+        /// Numerator of the rejected retention parameter.
+        numerator: u64,
+        /// Denominator of the rejected retention parameter.
+        denominator: u64,
+    },
+    /// The configured Bitcoin network difficulty `D_network` was zero, which
+    /// would make the expected value of every bead undefined.
+    ZeroNetworkDifficulty,
+    /// A fixed-point intermediate could not be represented.
+    ArithmeticOverflow {
+        /// The computation that overflowed.
+        operation: &'static str,
+    },
+    /// The fee amplifier `A_i = B_base + F_i` exceeded the maximum Bitcoin
+    /// amount, so the bead's committed template cannot be valid.
+    FeeOverflow {
+        /// The fee total, in satoshis, that could not be amplified.
+        fees: u64,
+    },
+    /// The active UHPO state carries no weight, so no payout percentage is
+    /// defined. Either no bead has been recorded or every retained cohort has
+    /// decayed to zero.
+    EmptyPool,
+    /// A settled payout address could not be resolved to an output script for
+    /// the configured chain. Addresses are resolved before settlement, so this
+    /// indicates a logic fault in the coinbase builder rather than bad input.
+    UnresolvedPayoutAddress {
+        /// The payout address that could not be resolved.
+        payout_address: String,
+    },
+    /// Every nominal output fell below the network dust limit, leaving no
+    /// qualifying miner to redistribute the aggregated dust to.
+    NoQualifyingMiners {
+        /// The dust limit in satoshis that no output reached.
+        dust_limit: u64,
+        /// The block reward in satoshis that was being settled.
+        total_reward: u64,
+    },
+}
+
+impl fmt::Display for EdcaError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            EdcaError::InvalidRetention {
+                numerator,
+                denominator,
+            } => write!(
+                f,
+                "Invalid EDCA retention parameter {}/{}, expected 0 < r < 1",
+                numerator, denominator
+            ),
+            EdcaError::ZeroNetworkDifficulty => {
+                write!(f, "EDCA network difficulty must be non-zero")
+            }
+            EdcaError::ArithmeticOverflow { operation } => {
+                write!(f, "EDCA fixed-point overflow while computing {}", operation)
+            }
+            EdcaError::FeeOverflow { fees } => write!(
+                f,
+                "EDCA fee amplifier overflowed for a template carrying {} satoshis in fees",
+                fees
+            ),
+            EdcaError::EmptyPool => {
+                write!(f, "EDCA active pool weight is zero, no payout is defined")
+            }
+            EdcaError::UnresolvedPayoutAddress { payout_address } => write!(
+                f,
+                "Settled payout address {:?} has no output script on this network",
+                payout_address
+            ),
+            EdcaError::NoQualifyingMiners {
+                dust_limit,
+                total_reward,
+            } => write!(
+                f,
+                "No EDCA payout reaches the {} satoshi dust limit when settling {} satoshis",
+                dust_limit, total_reward
+            ),
+        }
+    }
+}
+impl std::error::Error for EdcaError {}

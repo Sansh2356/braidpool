@@ -31,6 +31,12 @@ pub mod constants {
     pub const MAX_EXTRANONCE_LEN: usize = 32;
     pub const MAX_BITCOIN_HEIGHT: u32 = 10_000_000;
     pub const MAX_BIP34_HEIGHT_BYTES: usize = 4;
+    /// Upper bound on per-miner payout outputs in a Braidpool coinbase.
+    ///
+    /// Mirrors [`crate::payout::coinbase::MAX_PAYOUT_OUTPUTS`]; the roster is
+    /// already trimmed to this size before it reaches the coinbase builder, so
+    /// the check here is a guard against a caller that skipped that step.
+    pub const MAX_PAYOUT_OUTPUTS: usize = crate::payout::coinbase::MAX_PAYOUT_OUTPUTS;
 }
 
 #[derive(Debug, Clone)]
@@ -338,12 +344,41 @@ fn create_segwit_commitment_output(commitment_bytes: &[u8]) -> Result<TxOut, Coi
     })
 }
 
+/// Returns the total coinbase value carried by a block template.
+///
+/// This is the `A_total` an EDCA settlement must be divided across: the block
+/// subsidy plus every transaction fee Bitcoin Core put in the template.
+///
+/// # Arguments
+/// * `components` - Block template data from Bitcoin Core IPC
+///
+/// # Returns
+/// The template's coinbase value.
+///
+/// # Errors
+/// Returns [`CoinbaseError::TemplateMissingOutputs`] if the template's coinbase
+/// has no outputs, or a decode error if it cannot be parsed.
+pub fn template_coinbase_value(
+    components: &BlockTemplateComponents,
+) -> Result<Amount, CoinbaseError> {
+    let coinbase = parse_coinbase_transaction(&components.coinbase_transaction)?;
+    coinbase
+        .output
+        .first()
+        .map(|output| output.value)
+        .ok_or(CoinbaseError::TemplateMissingOutputs)
+}
+
 /// Build a Braidpool coinbase transaction from BlockTemplateComponents
 ///
 /// This creates a coinbase transaction with the format:
 /// - Output 0: Paying the full block reward (subsidy + fees) to the pool's address.
 /// - Output 1: The wtxid commitment (SegWit commitment), if present.
 /// - Output 2: OP_RETURN with Braidpool commitment + extranonce.
+///
+/// Equivalent to [`build_braidpool_coinbase_with_payouts`] with an empty payout
+/// roster; retained for callers that have no EDCA state to settle.
+///
 /// # Arguments
 /// * `components` - Block template data from Bitcoin Core IPC
 /// * `braidpool_commitment` - Pool-specific commitment data (max 72 bytes)
@@ -356,6 +391,59 @@ pub fn build_braidpool_coinbase_from_template(
     extranonce: &[u8],
     block_height: u32,
     config: &CoinbaseConfig,
+) -> Result<FinalCoinbase, CoinbaseError> {
+    build_braidpool_coinbase_with_payouts(
+        components,
+        braidpool_commitment,
+        extranonce,
+        block_height,
+        config,
+        &[],
+    )
+}
+
+/// Build a Braidpool coinbase that pays each miner their EDCA share.
+///
+/// The single pool output of [`build_braidpool_coinbase_from_template`] is
+/// replaced by one output per miner, sized by that miner's decayed share of the
+/// active UHPO state. The roster comes from
+/// [`crate::payout::coinbase::build_payout_distribution`], which has already
+/// applied the fee amplifier, the cohort decay, the dust sweep and the
+/// deterministic rounding rule — so this function's only job is to check the
+/// roster balances the template and to lay the outputs out in the coinbase.
+///
+/// The resulting output layout is:
+/// - Outputs `0..n`: one per qualifying miner, largest first.
+/// - Output `n`: the wtxid commitment (SegWit commitment), if present.
+/// - Output `n+1`: OP_RETURN with Braidpool commitment + extranonce.
+///
+/// An empty roster falls back to a single output paying the whole reward to the
+/// pool's own address, which is the correct behaviour before any share has been
+/// accepted and whenever the payout state cannot be settled.
+///
+/// # Arguments
+/// * `components` - Block template data from Bitcoin Core IPC
+/// * `braidpool_commitment` - Pool-specific commitment data (max 72 bytes)
+/// * `extranonce` - Mining work distribution data (max 32 bytes)
+/// * `block_height` - Current blockchain tip height (will be incremented for BIP-34)
+/// * `config` - Pool configuration including payout address and identifier
+/// * `payout_outputs` - Per-miner payout outputs, or empty to pay the pool
+///
+/// # Returns
+/// The assembled coinbase transaction.
+///
+/// # Errors
+/// Returns [`CoinbaseError::PayoutValueMismatch`] if the roster does not sum to
+/// the template's coinbase value, [`CoinbaseError::TooManyPayoutOutputs`] if it
+/// exceeds the coinbase output budget, and otherwise the same errors as
+/// [`build_braidpool_coinbase_from_template`].
+pub fn build_braidpool_coinbase_with_payouts(
+    components: &BlockTemplateComponents,
+    braidpool_commitment: &[u8],
+    extranonce: &[u8],
+    block_height: u32,
+    config: &CoinbaseConfig,
+    payout_outputs: &[TxOut],
 ) -> Result<FinalCoinbase, CoinbaseError> {
     if extranonce.len() > constants::MAX_EXTRANONCE_LEN {
         return Err(CoinbaseError::InvalidExtranonceLength);
@@ -381,33 +469,64 @@ pub fn build_braidpool_coinbase_from_template(
     };
 
     // Calculate the total available funds (extracted reward + fees).
-    let total_available = original_coinbase.output[0].value.to_sat();
+    let first_output = original_coinbase
+        .output
+        .first()
+        .ok_or(CoinbaseError::TemplateMissingOutputs)?;
+    let total_available = first_output.value.to_sat();
 
-    // Create the single payout output for the entire available amount.
-    // According to the type of chain/network derive the pubkeyscript
-    let payout_script = match config.network {
-        PoolNetwork::Cpunet => Cpunet::decode_bech32_address(&config.pool_payout_address)
-            .map_err(|e| CoinbaseError::InvalidBitcoinAddress(e.to_string()))?,
-        // Use standard rust-bitcoin address parsing for other networks
-        PoolNetwork::Bitcoin(network) => {
-            let payout_address = Address::from_str(&config.pool_payout_address)
-                .map_err(CoinbaseError::AddressError)?
-                .require_network(network)
-                .map_err(|_| CoinbaseError::AddressNetworkMismatch)?;
-            payout_address.script_pubkey()
+    // Either split the reward across the miners EDCA says are owed it, or fall
+    // back to a single output paying the pool.
+    let reward_payouts = if payout_outputs.is_empty() {
+        // According to the type of chain/network derive the pubkeyscript
+        let payout_script = match config.network {
+            PoolNetwork::Cpunet => Cpunet::decode_bech32_address(&config.pool_payout_address)
+                .map_err(|e| CoinbaseError::InvalidBitcoinAddress(e.to_string()))?,
+            // Use standard rust-bitcoin address parsing for other networks
+            PoolNetwork::Bitcoin(network) => {
+                let payout_address = Address::from_str(&config.pool_payout_address)
+                    .map_err(CoinbaseError::AddressError)?
+                    .require_network(network)
+                    .map_err(|_| CoinbaseError::AddressNetworkMismatch)?;
+                payout_address.script_pubkey()
+            }
+        };
+        vec![TxOut {
+            value: Amount::from_sat(total_available),
+            script_pubkey: payout_script,
+        }]
+    } else {
+        if payout_outputs.len() > constants::MAX_PAYOUT_OUTPUTS {
+            return Err(CoinbaseError::TooManyPayoutOutputs {
+                supplied: payout_outputs.len(),
+                maximum: constants::MAX_PAYOUT_OUTPUTS,
+            });
         }
-    };
-
-    let reward_payout = TxOut {
-        value: Amount::from_sat(total_available),
-        script_pubkey: payout_script,
+        // The roster is settled against a reward the caller read from this same
+        // template, but the template can be refreshed underneath it. Refusing a
+        // mismatch is what stops a stale roster from burning miner rewards or
+        // producing a block that creates value out of nothing.
+        let payout_total = payout_outputs
+            .iter()
+            .try_fold(Amount::ZERO, |sum, output| sum.checked_add(output.value))
+            .ok_or(CoinbaseError::PayoutValueMismatch {
+                payout_total: u64::MAX,
+                template_total: total_available,
+            })?;
+        if payout_total.to_sat() != total_available {
+            return Err(CoinbaseError::PayoutValueMismatch {
+                payout_total: payout_total.to_sat(),
+                template_total: total_available,
+            });
+        }
+        payout_outputs.to_vec()
     };
 
     // Build OP_RETURN output.
     let braidpool_output = build_braidpool_op_return(braidpool_commitment, extranonce)?;
 
-    // Build final outputs in the correct order: [REWARD, WTXID, BRAIDPOOL_OPRETURN].
-    let mut final_outputs = vec![reward_payout];
+    // Build final outputs in the correct order: [REWARD.., WTXID, BRAIDPOOL_OPRETURN].
+    let mut final_outputs = reward_payouts;
     if let Some(segwit_output) = segwit_commitment {
         final_outputs.push(segwit_output);
     }
@@ -538,13 +657,54 @@ pub fn create_block_template(
     nonce: u32,
     config: &CoinbaseConfig,
 ) -> Result<FinalTemplate, CoinbaseError> {
+    create_block_template_with_payouts(
+        components,
+        braidpool_commitment,
+        extranonce,
+        block_height,
+        nonce,
+        config,
+        &[],
+    )
+}
+
+/// Assembles a complete block whose coinbase pays each miner their EDCA share.
+///
+/// Identical to [`create_block_template`] except that the coinbase reward is
+/// split across `payout_outputs` instead of going to the pool's own address.
+/// An empty roster reproduces [`create_block_template`] exactly.
+///
+/// # Arguments
+/// * `components` - Block template data from Bitcoin Core
+/// * `braidpool_commitment` - Pool-specific commitment data
+/// * `extranonce` - Mining work distribution identifier
+/// * `block_height` - Current blockchain tip height
+/// * `nonce` - Mining nonce value
+/// * `config` - Pool configuration settings
+/// * `payout_outputs` - Per-miner payout outputs, or empty to pay the pool
+///
+/// # Returns
+/// The assembled template, with a merkle root recomputed over the new coinbase.
+///
+/// # Errors
+/// As [`build_braidpool_coinbase_with_payouts`].
+pub fn create_block_template_with_payouts(
+    components: &BlockTemplateComponents,
+    braidpool_commitment: &[u8],
+    extranonce: &[u8],
+    block_height: u32,
+    nonce: u32,
+    config: &CoinbaseConfig,
+    payout_outputs: &[TxOut],
+) -> Result<FinalTemplate, CoinbaseError> {
     // Build the custom coinbase transaction
-    let final_coinbase = build_braidpool_coinbase_from_template(
+    let final_coinbase = build_braidpool_coinbase_with_payouts(
         components,
         braidpool_commitment,
         extranonce,
         block_height,
         config,
+        payout_outputs,
     )?;
 
     let coinbase_txid = final_coinbase.transaction.compute_txid();
@@ -909,4 +1069,189 @@ fn test_varint_comprehensive() {
     let (decoded_max, bytes_read_max) = deserialize_partial::<VarInt>(&encoded_max).unwrap();
     assert_eq!(decoded_max.0, max_value);
     assert_eq!(bytes_read_max, 9);
+}
+
+#[cfg(test)]
+mod payout_tests {
+    use super::*;
+    use crate::config::PoolNetwork;
+    use crate::ipc::client::BlockTemplateComponents;
+    use crate::payout::coinbase::resolve_payout_script;
+    use bitcoin::Network;
+
+    /// The chain these tests build coinbases for.
+    const TEST_NETWORK: PoolNetwork = PoolNetwork::Bitcoin(Network::Regtest);
+
+    /// Regtest P2WPKH miner addresses, derived from the secp256k1 scalars 1..3.
+    const MINERS: [&str; 3] = [
+        "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080",
+        "bcrt1qq6hag67dl53wl99vzg42z8eyzfz2xlkvwk6f7m",
+        "bcrt1q0ht9tyks4vh7p5p904t340cr9nvahy7uevmqwj",
+    ];
+
+    /// Total coinbase value carried by the fixture template.
+    const TEMPLATE_REWARD: u64 = 5_000_012_345;
+
+    /// Builds a minimal template whose coinbase pays `TEMPLATE_REWARD` to a
+    /// single output, which is the shape Bitcoin Core hands back over IPC.
+    fn fixture_components() -> BlockTemplateComponents {
+        let original_coinbase = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig: ScriptBuf::from_bytes(vec![0x51]),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(TEMPLATE_REWARD),
+                script_pubkey: resolve_payout_script(MINERS[0], TEST_NETWORK)
+                    .expect("fixture address is valid"),
+            }],
+        };
+
+        BlockTemplateComponents {
+            header: vec![0u8; 80],
+            coinbase_transaction: serialize(&original_coinbase),
+            fees: Vec::new(),
+            coinbase_merkle_path: Vec::new(),
+            coinbase_commitment: Vec::new(),
+            block_hex: Vec::new(),
+        }
+    }
+
+    /// Pool configuration for the fixture chain.
+    fn fixture_config() -> CoinbaseConfig {
+        CoinbaseConfig::from_network(TEST_NETWORK)
+    }
+
+    /// Splits `TEMPLATE_REWARD` across `MINERS` so the roster balances exactly.
+    fn balanced_roster() -> Vec<TxOut> {
+        let per_miner = TEMPLATE_REWARD / MINERS.len() as u64;
+        let mut outputs: Vec<TxOut> = MINERS
+            .iter()
+            .map(|address| TxOut {
+                value: Amount::from_sat(per_miner),
+                script_pubkey: resolve_payout_script(address, TEST_NETWORK)
+                    .expect("fixture address is valid"),
+            })
+            .collect();
+        // Hand the flooring remainder to the first miner, as the settlement does.
+        let assigned = per_miner * MINERS.len() as u64;
+        outputs[0].value += Amount::from_sat(TEMPLATE_REWARD - assigned);
+        outputs
+    }
+
+    #[test]
+    fn an_empty_roster_pays_the_pool_address() {
+        let coinbase = build_braidpool_coinbase_with_payouts(
+            &fixture_components(),
+            b"commitment",
+            &[1, 2, 3, 4],
+            100,
+            &fixture_config(),
+            &[],
+        )
+        .expect("coinbase builds");
+
+        // [REWARD, BRAIDPOOL_OPRETURN]; no segwit commitment in the fixture.
+        assert_eq!(coinbase.transaction.output.len(), 2);
+        assert_eq!(
+            coinbase.transaction.output[0].value,
+            Amount::from_sat(TEMPLATE_REWARD)
+        );
+        let pool_script =
+            resolve_payout_script(&fixture_config().pool_payout_address, TEST_NETWORK)
+                .expect("pool address is valid");
+        assert_eq!(coinbase.transaction.output[0].script_pubkey, pool_script);
+    }
+
+    #[test]
+    fn a_payout_roster_replaces_the_single_pool_output() {
+        let roster = balanced_roster();
+        let coinbase = build_braidpool_coinbase_with_payouts(
+            &fixture_components(),
+            b"commitment",
+            &[1, 2, 3, 4],
+            100,
+            &fixture_config(),
+            &roster,
+        )
+        .expect("coinbase builds");
+
+        // One output per miner, then the OP_RETURN.
+        assert_eq!(coinbase.transaction.output.len(), MINERS.len() + 1);
+        for (index, expected) in roster.iter().enumerate() {
+            assert_eq!(&coinbase.transaction.output[index], expected);
+        }
+
+        // The coinbase still pays out exactly what the template funded, so the
+        // block remains valid.
+        let paid: Amount = coinbase.transaction.output[..MINERS.len()]
+            .iter()
+            .fold(Amount::ZERO, |sum, output| sum + output.value);
+        assert_eq!(paid, Amount::from_sat(TEMPLATE_REWARD));
+    }
+
+    #[test]
+    fn a_roster_that_does_not_balance_the_template_is_rejected() {
+        // A stale roster settled against an older, smaller template.
+        let mut roster = balanced_roster();
+        roster[0].value -= Amount::from_sat(1);
+
+        let error = build_braidpool_coinbase_with_payouts(
+            &fixture_components(),
+            b"commitment",
+            &[1, 2, 3, 4],
+            100,
+            &fixture_config(),
+            &roster,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            CoinbaseError::PayoutValueMismatch {
+                payout_total: TEMPLATE_REWARD - 1,
+                template_total: TEMPLATE_REWARD,
+            }
+        );
+    }
+
+    #[test]
+    fn a_roster_past_the_output_budget_is_rejected() {
+        let single = TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: resolve_payout_script(MINERS[0], TEST_NETWORK)
+                .expect("fixture address is valid"),
+        };
+        let roster = vec![single; constants::MAX_PAYOUT_OUTPUTS + 1];
+
+        let error = build_braidpool_coinbase_with_payouts(
+            &fixture_components(),
+            b"commitment",
+            &[1, 2, 3, 4],
+            100,
+            &fixture_config(),
+            &roster,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            CoinbaseError::TooManyPayoutOutputs {
+                supplied: constants::MAX_PAYOUT_OUTPUTS + 1,
+                maximum: constants::MAX_PAYOUT_OUTPUTS,
+            }
+        );
+    }
+
+    #[test]
+    fn template_coinbase_value_reads_the_funded_reward() {
+        assert_eq!(
+            template_coinbase_value(&fixture_components()).expect("template parses"),
+            Amount::from_sat(TEMPLATE_REWARD)
+        );
+    }
 }

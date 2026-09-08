@@ -242,11 +242,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .into());
         }
     };
+    //Active EDCA payout state. Successful `mining.submit` calls fold beads into
+    //it through the swarm handler, and template creation reads the settled
+    //roster back out to split the coinbase across the miners who earned it.
+    let payout_tracker = Arc::new(node::payout::tracker::PayoutTracker::new(network).map_err(
+        |error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Invalid EDCA payout parameters: {}", error),
+            )
+        },
+    )?);
     //Communication bridge between stratum and network swarm and swarm commands also, for communicating share population and propogating them further
     let (swarm_handler, mut swarm_command_receiver) = SwarmHandler::new(
         Arc::clone(&braid),
         db_tx.clone(),
         Arc::clone(&dashboard_notifier),
+        Arc::clone(&payout_tracker),
     );
 
     //Swarm command sender
@@ -1031,6 +1043,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         let template_cache = template_cache_for_listener.clone();
                         let network = network_for_ipc;
                         let rpc_command_rx = rpc_proxy_rx;
+                        let payout_tracker_for_ipc = Arc::clone(&payout_tracker);
 
                         async move {
                             match node::ipc::ipc_block_listener(
@@ -1040,6 +1053,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 template_cache,
                                 block_submission_rx,
                                 rpc_command_rx,
+                                payout_tracker_for_ipc,
                             )
                             .await
                             {

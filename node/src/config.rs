@@ -216,6 +216,12 @@ impl CoinbaseConfig {
     /// The payout address is chosen from the network, so it can never be
     /// silently coerced onto a default chain, which would produce shares and
     /// payout addresses for the wrong chain.
+    ///
+    /// Every variant encodes the same witness program under that chain's own
+    /// bech32 human-readable part. The checksum covers the HRP, so an address
+    /// cannot be ported between chains by editing its prefix - each has to be
+    /// re-encoded. `default_payout_addresses_are_valid_for_their_network`
+    /// guards that.
     pub fn from_network(network: PoolNetwork) -> Self {
         let pool_payout_address = match network {
             PoolNetwork::Cpunet => "tc1qu3cdq9unyhdc3d2hw8mvpfgnnhvp6ucckkl6ft".to_string(),
@@ -223,9 +229,9 @@ impl CoinbaseConfig {
                 "bc1qpa77defz30uavu8lxef98q95rae6m7t8au9vp7".to_string()
             }
             PoolNetwork::Bitcoin(Network::Regtest) => {
-                "bcrt1qpa77defz30uavu8lxef98q95rae6m7t8au9vp7".to_string()
+                "bcrt1qpa77defz30uavu8lxef98q95rae6m7t84n8jdy".to_string()
             }
-            PoolNetwork::Bitcoin(_) => "tb1qpa77defz30uavu8lxef98q95rae6m7t8au9vp7".to_string(),
+            PoolNetwork::Bitcoin(_) => "tb1qpa77defz30uavu8lxef98q95rae6m7t8h67l6d".to_string(),
         };
 
         Self {
@@ -239,15 +245,47 @@ impl CoinbaseConfig {
 #[cfg(test)]
 mod test {
     use std::path::Path;
+    use std::str::FromStr;
 
     use bitcoin::Network;
 
     use crate::config::{BraidRpcConfig, MinerConfig};
 
     use super::{
-        BitcoinConfig, BraidDirectoryConfig, BraidpoolConfig, NetworkConfig, PoolNetwork,
-        SUPPORTED_NETWORKS,
+        BitcoinConfig, BraidDirectoryConfig, BraidpoolConfig, CoinbaseConfig, NetworkConfig,
+        PoolNetwork, SUPPORTED_NETWORKS,
     };
+
+    #[test]
+    fn default_payout_addresses_are_valid_for_their_network() {
+        // A bech32 checksum covers the human-readable part, so an address
+        // cannot be moved between chains by rewriting its prefix. Getting this
+        // wrong is silent until template creation fails on that chain, so every
+        // supported network is checked here.
+        for name in SUPPORTED_NETWORKS {
+            let network = PoolNetwork::from_name(name).expect("supported name resolves");
+            let config = CoinbaseConfig::from_network(network);
+
+            // Cpunet uses its own address encoding and is decoded by the cpunet
+            // module rather than by rust-bitcoin.
+            let PoolNetwork::Bitcoin(bitcoin_network) = network else {
+                continue;
+            };
+
+            let address =
+                bitcoin::Address::from_str(&config.pool_payout_address).unwrap_or_else(|error| {
+                    panic!(
+                        "{name} payout address {:?} does not parse: {error}",
+                        config.pool_payout_address
+                    )
+                });
+            assert!(
+                address.is_valid_for_network(bitcoin_network),
+                "{name} payout address {:?} is not valid on {bitcoin_network:?}",
+                config.pool_payout_address
+            );
+        }
+    }
 
     #[test]
     fn every_supported_name_round_trips() {

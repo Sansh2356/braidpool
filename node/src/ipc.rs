@@ -3,8 +3,11 @@ use crate::config::CoinbaseConfig;
 use crate::config::PoolNetwork;
 use crate::error::CoinbaseError;
 use crate::error::{classify_error, ErrorKind};
+use crate::payout::tracker::PayoutTracker;
 use crate::rpc_server::RpcProxyCommand;
-use crate::template_creator::{create_block_template, FinalTemplate};
+use crate::template_creator::{
+    create_block_template_with_payouts, template_coinbase_value, FinalTemplate,
+};
 use crate::utils::compute_block_hash;
 use crate::{TemplateId, MAX_CACHED_TEMPLATES};
 use std::collections::HashMap;
@@ -38,6 +41,7 @@ pub async fn ipc_block_listener(
         crate::stratum::BlockSubmissionRequest,
     >,
     mut rpc_command_rx: tokio::sync::mpsc::UnboundedReceiver<RpcProxyCommand>,
+    payout_tracker: Arc<PayoutTracker>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!(
         socket = %ipc_socket_path,
@@ -124,6 +128,7 @@ pub async fn ipc_block_listener(
                     "initial template",
                     tip_height,
                     network,
+                    &payout_tracker,
                 ).await {
                     Ok(template) => {
                         if let Err(e) = block_template_tx.send(Arc::new(template)).await {
@@ -184,6 +189,7 @@ pub async fn ipc_block_listener(
                                                 &format!("block {}", height),
                                                 height,
                                                 network,
+                                                &payout_tracker,
                                             ).await {
                                                 Ok(template) => {
                                                     if let Err(e) = block_template_tx.send(Arc::new(template)).await {
@@ -439,6 +445,7 @@ async fn get_template(
     context: &str,
     block_height: u32,
     network: PoolNetwork,
+    payout_tracker: &PayoutTracker,
 ) -> Result<client::BlockTemplate, Box<dyn std::error::Error>> {
     const MIN_TRANSACTION_COUNT: u64 = 1;
     const NONCE: u32 = 0;
@@ -449,8 +456,29 @@ async fn get_template(
         .get_block_template_components(None, Some(priority))
         .await?;
 
-    let final_template =
-        create_braidpool_template(&components.components, &config, block_height, NONCE)?;
+    // Split the coinbase across the miners who earned it. Every accepted
+    // `mining.submit` has already been folded into the EDCA state, so this is
+    // where that work turns into spendable outputs. Before any share has been
+    // accepted the roster is empty and the whole reward goes to the pool
+    // address, exactly as it did before EDCA was wired in.
+    let total_reward = template_coinbase_value(&components.components)?;
+    let payout_outputs = payout_tracker.payout_outputs(total_reward).await;
+    if !payout_outputs.is_empty() {
+        info!(
+            context = %context,
+            miners = payout_outputs.len(),
+            total_reward = %total_reward,
+            "Coinbase split across EDCA payout roster"
+        );
+    }
+
+    let final_template = create_braidpool_template(
+        &components.components,
+        &config,
+        block_height,
+        NONCE,
+        &payout_outputs,
+    )?;
 
     let complete_block_bytes = final_template.complete_block_hex.clone();
     if complete_block_bytes.is_empty() {
@@ -480,16 +508,18 @@ fn create_braidpool_template(
     config: &CoinbaseConfig,
     block_height: u32,
     nonce: u32,
+    payout_outputs: &[bitcoin::TxOut],
 ) -> Result<FinalTemplate, CoinbaseError> {
     let braidpool_commitment = b"braidpool_bead_metadata_hash_32b";
     //8 bytes that is extranonce has a size of 32 bits
     let extranonce = &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
-    create_block_template(
+    create_block_template_with_payouts(
         components,
         braidpool_commitment,
         extranonce,
         block_height,
         nonce,
         config,
+        payout_outputs,
     )
 }
