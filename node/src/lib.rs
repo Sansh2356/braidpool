@@ -40,6 +40,7 @@ pub mod cli;
 pub mod committed_metadata;
 pub mod config;
 pub mod db;
+pub mod edca;
 pub mod error;
 pub mod ibd_manager;
 pub mod ipc;
