@@ -1,4 +1,4 @@
-use crate::edca::fixed::{mul_frac, FRAC_BITS, ONE};
+use crate::edca::fixed::{FRAC_BITS, ONE};
 use crate::error::EdcaError;
 
 /// Hard ceiling on the number of entries in a [`DecayTable`].
@@ -32,7 +32,10 @@ impl DecayTable {
                 Some(value) => *value,
                 None => return Err(EdcaError::FixedPointOverflow),
             };
-            let next = mul_frac(previous, retention)?;
+            let next = previous
+                .checked_mul(numerator as u128)
+                .ok_or(EdcaError::FixedPointOverflow)?
+                / (denominator as u128);
             if next == 0 {
                 // r^k has underflowed below one (u64,u64); every older cohort
                 // has an exactly zero multiplier.

@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use num::{BigUint, ToPrimitive};
 
 use crate::edca::state::{EdcaState, MinerKey};
 use crate::error::EdcaError;
@@ -68,12 +69,14 @@ pub fn nominal_outputs(
     let mut allocated: u64 = 0;
 
     for (miner, weight) in totals {
-        let numerator = weight
-            .checked_mul(total_sats as u128)
-            .ok_or(EdcaError::WeightOverflow)?;
-        let quotient = numerator / pool_weight;
-        let remainder = numerator % pool_weight;
-        let share = u64::try_from(quotient).map_err(|_| EdcaError::FixedPointOverflow)?;
+        let numerator = BigUint::from(*weight) * BigUint::from(total_sats);
+        let pool = BigUint::from(pool_weight);
+        let share = (&numerator / &pool)
+            .to_u64()
+            .ok_or(EdcaError::FixedPointOverflow)?;
+        let remainder = (&numerator % &pool)
+            .to_u128()
+            .ok_or(EdcaError::FixedPointOverflow)?;
         allocated = allocated
             .checked_add(share)
             .ok_or(EdcaError::WeightOverflow)?;
@@ -256,7 +259,7 @@ pub fn settle_totals(
             weight: totals.get(miner).copied().unwrap_or(0),
         });
     }
-    // Forming final Payout to be committed inside coinbase transaction before forwarding 
+    // Forming final Payout to be committed inside coinbase transaction before forwarding
     // template to each miner .
     let roster = PayoutEntity {
         entries,
