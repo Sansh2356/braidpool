@@ -21,6 +21,19 @@ impl AmplifierSource for SubsidyOnlyAmplifier {
     }
 }
 
+/// [`AmplifierSource`] that reads `F_i` from the bead's committed metadata.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CommittedFeeAmplifier;
+
+impl AmplifierSource for CommittedFeeAmplifier {
+    fn fee_sats(&self, bead: &Bead) -> Result<u64, EdcaError> {
+        Ok(bead
+            .committed_metadata
+            .fee_total_sats
+            .min(bitcoin::Amount::MAX_MONEY.to_sat()))
+    }
+}
+
 /// Computes the fee amplifier `A_i = B_base + F_i` of .
 pub fn fee_amplifier(base_subsidy_sats: u64, fee_sats: u64) -> Result<u64, EdcaError> {
     base_subsidy_sats

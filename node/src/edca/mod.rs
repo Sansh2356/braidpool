@@ -1,16 +1,22 @@
 pub mod decay;
 pub mod fixed;
+pub mod payout;
 pub mod score;
 pub mod settle;
 pub mod state;
+pub mod validate_fees;
 
 use crate::config::PoolNetwork;
 use bitcoin::Network;
 
 pub use decay::{DecayTable, MAX_DECAY_TABLE_LEN};
-pub use score::{AmplifierSource, SubsidyOnlyAmplifier};
+pub use score::{AmplifierSource, CommittedFeeAmplifier, SubsidyOnlyAmplifier};
 pub use settle::{settle, settle_totals, PayoutEntity, PayoutEntry};
 pub use state::{CohortWeights, EdcaState, MinerKey};
+pub use validate_fees::{
+    compute_block_fees, transaction_fee, verify_fee_bound, verify_fee_commitment, FeeBound,
+    FeeCommitment, PrevoutSource, TransactionFee, TxFeeSource,
+};
 
 /// Protocol parameters for the EDCA payout engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
