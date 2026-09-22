@@ -1,6 +1,7 @@
 use crate::bead::Bead;
 use crate::edca::decay::DecayTable;
 use crate::edca::fixed::{mul_frac, ratio_q, target_to_biguint, ONE};
+use crate::edca::validate_fees::{FeeVerdict, FeeVerdictSource};
 use crate::error::EdcaError;
 
 /// Supplies the per-bead transaction fee total `F_i` that will be
@@ -22,6 +23,12 @@ impl AmplifierSource for SubsidyOnlyAmplifier {
 }
 
 /// [`AmplifierSource`] that reads `F_i` from the bead's committed metadata.
+///
+/// The value is whatever the miner committed, checked against nothing, so a
+/// bead can claim any fee total and be scored on it. Prefer
+/// [`VerdictAmplifier`], which pays only fees the node computed from its own
+/// template; this one remains for tests and for scoring a DAG whose templates
+/// the node cannot rebuild.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CommittedFeeAmplifier;
 
@@ -31,6 +38,33 @@ impl AmplifierSource for CommittedFeeAmplifier {
             .committed_metadata
             .fee_total_sats
             .min(bitcoin::Amount::MAX_MONEY.to_sat()))
+    }
+}
+
+/// [`AmplifierSource`] that pays only fees this node verified itself.
+///
+/// The fee comes from a [`TemplateEntry`](crate::edca::TemplateEntry) this node
+/// issued and priced itself, so a miner cannot inflate `A_i` by claiming fees
+/// they never carried. A bead that mined a different template, or one this node
+/// no longer holds, scores `F_i = 0` rather than failing the state - the same
+/// treatment a zero-target bead gets.
+pub struct VerdictAmplifier<'a> {
+    verdicts: &'a dyn FeeVerdictSource,
+}
+
+impl<'a> VerdictAmplifier<'a> {
+    /// Scores beads against `verdicts`.
+    pub fn new(verdicts: &'a dyn FeeVerdictSource) -> Self {
+        Self { verdicts }
+    }
+}
+
+impl AmplifierSource for VerdictAmplifier<'_> {
+    fn fee_sats(&self, bead: &Bead) -> Result<u64, EdcaError> {
+        Ok(match self.verdicts.verdict(bead) {
+            FeeVerdict::Verified { fee_sats } => fee_sats,
+            FeeVerdict::Deviated | FeeVerdict::Unknown => 0,
+        })
     }
 }
 

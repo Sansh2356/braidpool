@@ -2,7 +2,10 @@ use crate::bead::Bead;
 use crate::config::PoolNetwork;
 use crate::error::FeeProofError;
 use bitcoin::blockdata::block::Block;
-use bitcoin::{Amount, FeeRate, Network, OutPoint, Transaction, TxMerkleNode, TxOut, Txid, Weight};
+use bitcoin::hashes::{sha256d, Hash, HashEngine};
+use bitcoin::{
+    Amount, BlockHash, FeeRate, Network, OutPoint, Transaction, TxMerkleNode, TxOut, Txid, Weight,
+};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Block subsidy at height zero or genesis block in satoshis .
@@ -347,5 +350,271 @@ pub fn verify_fee_bound(
             computed_fees,
             missing,
         })
+    }
+}
+
+/// Identifies a template by the merkle branch above its coinbase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BranchKey([u8; 32]);
+
+impl BranchKey {
+    /// Derives the key from a coinbase merkle branch.
+    pub fn from_branch(branch: &[[u8; 32]]) -> Self {
+        let mut engine = sha256d::Hash::engine();
+        for sibling in branch {
+            engine.input(sibling);
+        }
+        BranchKey(sha256d::Hash::from_engine(engine).to_byte_array())
+    }
+
+    /// Returns the raw digest.
+    pub fn to_byte_array(self) -> [u8; 32] {
+        self.0
+    }
+}
+
+/// Hashes two merkle nodes into their parent.
+fn hash_pair(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    let mut engine = sha256d::Hash::engine();
+    engine.input(left);
+    engine.input(right);
+    sha256d::Hash::from_engine(engine).to_byte_array()
+}
+
+/// Folds a coinbase txid up a merkle branch into the root it implies.
+pub fn root_from_branch(coinbase_txid: Txid, branch: &[[u8; 32]]) -> TxMerkleNode {
+    let mut current = coinbase_txid.to_byte_array();
+    for sibling in branch {
+        current = hash_pair(&current, sibling);
+    }
+    TxMerkleNode::from_byte_array(current)
+}
+
+/// Where a committed-mempool state sits on the Bitcoin chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChainAnchor {
+    /// Block the state builds on.
+    pub prev_blockhash: BlockHash,
+    /// Height of the block being built, one past `prev_blockhash`.
+    pub height: u64,
+    /// Block subsidy at `height`, in satoshis.
+    pub subsidy_sats: u64,
+}
+
+impl ChainAnchor {
+    /// Anchors a state to `prev_blockhash` at `height` on `network`.
+    pub fn new(prev_blockhash: BlockHash, height: u64, network: PoolNetwork) -> Self {
+        Self {
+            prev_blockhash,
+            height,
+            subsidy_sats: block_subsidy_sats(height, network),
+        }
+    }
+}
+
+/// A template this node issued, priced once when it was built.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemplateEntry {
+    /// Chain position this template builds on.
+    pub anchor: ChainAnchor,
+    /// Identifies the template by its branch.
+    pub key: BranchKey,
+    /// Merkle siblings above the coinbase, shared by every bead mined on it.
+    pub coinbase_branch: Vec<[u8; 32]>,
+    /// `F_i` for every bead mined on this template, in satoshis.
+    pub fee_total_sats: u64,
+    /// Transactions in the template, coinbase excluded.
+    pub tx_count: usize,
+}
+
+impl TemplateEntry {
+    /// Prices a template from the branch and fees Bitcoin Core returned.
+    pub fn new(
+        anchor: ChainAnchor,
+        coinbase_branch: Vec<[u8; 32]>,
+        fees_sats: &[u64],
+    ) -> Result<Self, FeeProofError> {
+        let fee_total_sats = fees_sats
+            .iter()
+            .try_fold(0u64, |total, fee| total.checked_add(*fee))
+            .filter(|total| *total <= Amount::MAX_MONEY.to_sat())
+            .ok_or(FeeProofError::FeeTotalOverflow)?;
+
+        Ok(Self {
+            anchor,
+            key: BranchKey::from_branch(&coinbase_branch),
+            coinbase_branch,
+            fee_total_sats,
+            tx_count: fees_sats.len(),
+        })
+    }
+    pub fn from_branch_bytes(
+        anchor: ChainAnchor,
+        coinbase_merkle_path: &[Vec<u8>],
+        fees_sats: &[u64],
+    ) -> Result<Self, FeeProofError> {
+        let mut branch: Vec<[u8; 32]> = Vec::with_capacity(coinbase_merkle_path.len());
+        for sibling in coinbase_merkle_path {
+            let bytes: [u8; 32] =
+                sibling
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| FeeProofError::InvalidMerkleBranch {
+                        length: sibling.len(),
+                    })?;
+            branch.push(bytes);
+        }
+        Self::new(anchor, branch, fees_sats)
+    }
+
+    /// Returns whether a bead's header commits to this template.
+    pub fn matches(&self, coinbase_txid: Txid, header_root: TxMerkleNode) -> bool {
+        root_from_branch(coinbase_txid, &self.coinbase_branch) == header_root
+    }
+
+    /// Returns what a coinbase on this template may pay, in satoshis.
+    ///
+    /// `None` only if subsidy plus fees leaves the money range.
+    pub fn coinbase_value_sats(&self) -> Option<u64> {
+        self.anchor.subsidy_sats.checked_add(self.fee_total_sats)
+    }
+}
+
+/// Checks a bead against the template it should have mined.
+pub fn verify_fee_against_template(
+    bead: &Bead,
+    coinbase_txid: Txid,
+    template: &TemplateEntry,
+) -> Result<FeeCommitment, FeeProofError> {
+    if bead.block_header.prev_blockhash != template.anchor.prev_blockhash {
+        return Err(FeeProofError::AnchorMismatch {
+            expected: template.anchor.prev_blockhash,
+            found: bead.block_header.prev_blockhash,
+        });
+    }
+
+    let computed = root_from_branch(coinbase_txid, &template.coinbase_branch);
+    if computed != bead.block_header.merkle_root {
+        return Err(FeeProofError::MerkleRootMismatch {
+            header: bead.block_header.merkle_root,
+            computed,
+        });
+    }
+
+    let claimed_fee_sats = bead.committed_metadata.fee_total_sats;
+    if claimed_fee_sats != template.fee_total_sats {
+        return Err(FeeProofError::FeeCommitmentMismatch {
+            claimed_fee_sats,
+            derived_fee_sats: template.fee_total_sats,
+        });
+    }
+
+    let coinbase_value_sats = template
+        .coinbase_value_sats()
+        .ok_or(FeeProofError::CoinbaseValueOverflow)?;
+
+    Ok(FeeCommitment {
+        height: template.anchor.height,
+        subsidy_sats: template.anchor.subsidy_sats,
+        coinbase_value_sats,
+        fee_total_sats: template.fee_total_sats,
+    })
+}
+
+/// What a node concluded about a bead's fee total.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeeVerdict {
+    /// The bead built on a template this node priced, and its committed total
+    /// agrees with it.
+    Verified {
+        /// `F_i` for this bead, in satoshis.
+        fee_sats: u64,
+    },
+    /// The bead built on a known template but committed a different total, so
+    /// the claim is false.
+    Deviated,
+    /// No known template explains this bead; it may be honest but built on a
+    /// set this node never held.
+    Unknown,
+}
+
+/// Supplies fee verdicts for beads.
+pub trait FeeVerdictSource {
+    /// Returns what this node concluded about `bead`'s fee total.
+    fn verdict(&self, bead: &Bead) -> FeeVerdict;
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TemplateCache {
+    templates: BTreeMap<(BlockHash, BranchKey), (usize, TemplateEntry)>,
+}
+
+impl TemplateCache {
+    /// Creates an empty cache.
+    pub fn new() -> Self {
+        Self {
+            templates: BTreeMap::new(),
+        }
+    }
+
+    /// Records a template issued during `cohort_ordinal`.
+    pub fn insert(&mut self, cohort_ordinal: usize, template: TemplateEntry) {
+        self.templates.insert(
+            (template.anchor.prev_blockhash, template.key),
+            (cohort_ordinal, template),
+        );
+    }
+
+    /// Returns the template on `prev_blockhash` with `key`, if retained.
+    pub fn get(&self, prev_blockhash: BlockHash, key: BranchKey) -> Option<&TemplateEntry> {
+        self.templates
+            .get(&(prev_blockhash, key))
+            .map(|(_, template)| template)
+    }
+
+    /// Drops every template issued before `oldest_cohort`.
+    pub fn retire_below(&mut self, oldest_cohort: usize) {
+        self.templates
+            .retain(|_, (cohort, _)| *cohort >= oldest_cohort);
+    }
+
+    /// Returns the retained template a bead's header commits to, if any.
+    ///
+    /// Templates on another block are dismissed by their key without hashing.
+    pub fn template_for(&self, bead: &Bead, coinbase_txid: Txid) -> Option<&TemplateEntry> {
+        self.templates
+            .iter()
+            .filter(|((prev_blockhash, _), _)| *prev_blockhash == bead.block_header.prev_blockhash)
+            .map(|(_, (_, template))| template)
+            .find(|template| template.matches(coinbase_txid, bead.block_header.merkle_root))
+    }
+
+    /// Returns how many templates are retained.
+    pub fn len(&self) -> usize {
+        self.templates.len()
+    }
+
+    /// Returns whether no template is retained.
+    pub fn is_empty(&self) -> bool {
+        self.templates.is_empty()
+    }
+}
+
+impl FeeVerdictSource for TemplateCache {
+    fn verdict(&self, bead: &Bead) -> FeeVerdict {
+        // Index zero of the committed transactions is the bead's own coinbase.
+        let coinbase_txid = match bead.committed_metadata.transaction_ids.0.first() {
+            Some(txid) => *txid,
+            None => return FeeVerdict::Unknown,
+        };
+        match self.template_for(bead, coinbase_txid) {
+            Some(template) if template.fee_total_sats == bead.committed_metadata.fee_total_sats => {
+                FeeVerdict::Verified {
+                    fee_sats: template.fee_total_sats,
+                }
+            }
+            Some(_) => FeeVerdict::Deviated,
+            None => FeeVerdict::Unknown,
+        }
     }
 }

@@ -739,6 +739,13 @@ pub enum FeeProofError {
     NotCoinbase,
     /// The bead commits to no transactions, so it has no coinbase txid.
     NoTransactions,
+    /// A template's transaction fees sum past `MAX_MONEY`.
+    FeeTotalOverflow,
+    /// A merkle branch sibling was not 32 bytes.
+    InvalidMerkleBranch {
+        /// Length of the offending sibling, in bytes.
+        length: usize,
+    },
     /// The coinbase does not hash to the first committed txid.
     CoinbaseTxidMismatch {
         /// The first txid in the bead's `transaction_ids`.
@@ -750,6 +757,14 @@ pub enum FeeProofError {
     DuplicateTxid {
         /// The repeated txid.
         txid: bitcoin::Txid,
+    },
+    /// The bead builds on a different block than the state it was checked
+    /// against.
+    AnchorMismatch {
+        /// The block the state builds on.
+        expected: bitcoin::BlockHash,
+        /// The block the bead's header commits to.
+        found: bitcoin::BlockHash,
     },
     /// The committed txids do not produce the merkle root in the bead's header.
     MerkleRootMismatch {
@@ -831,6 +846,17 @@ impl fmt::Display for FeeProofError {
             FeeProofError::NoTransactions => {
                 write!(f, "Bead commits to no transactions")
             }
+            FeeProofError::FeeTotalOverflow => {
+                write!(f, "Template transaction fees sum past MAX_MONEY")
+            }
+            FeeProofError::InvalidMerkleBranch { length } => {
+                write!(f, "Merkle branch sibling is {} bytes, expected 32", length)
+            }
+            FeeProofError::AnchorMismatch { expected, found } => write!(
+                f,
+                "Bead builds on block {} but was checked against state on {}",
+                found, expected
+            ),
             FeeProofError::CoinbaseTxidMismatch {
                 committed,
                 computed,

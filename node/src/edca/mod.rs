@@ -10,12 +10,14 @@ use crate::config::PoolNetwork;
 use bitcoin::Network;
 
 pub use decay::{DecayTable, MAX_DECAY_TABLE_LEN};
-pub use score::{AmplifierSource, CommittedFeeAmplifier, SubsidyOnlyAmplifier};
+pub use score::{AmplifierSource, CommittedFeeAmplifier, SubsidyOnlyAmplifier, VerdictAmplifier};
 pub use settle::{settle, settle_totals, PayoutEntity, PayoutEntry};
 pub use state::{CohortWeights, EdcaState, MinerKey};
 pub use validate_fees::{
-    compute_block_fees, transaction_fee, verify_fee_bound, verify_fee_commitment, FeeBound,
-    FeeCommitment, PrevoutSource, TransactionFee, TxFeeSource,
+    compute_block_fees, root_from_branch, transaction_fee, verify_fee_against_template,
+    verify_fee_bound, verify_fee_commitment, BranchKey, ChainAnchor, FeeBound, FeeCommitment,
+    FeeVerdict, FeeVerdictSource, PrevoutSource, TemplateCache, TemplateEntry, TransactionFee,
+    TxFeeSource,
 };
 
 /// Protocol parameters for the EDCA payout engine.
