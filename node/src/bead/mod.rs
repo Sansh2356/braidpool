@@ -45,6 +45,12 @@ pub struct Bead {
     pub committed_metadata: CommittedMetadata,
     pub uncommitted_metadata: UnCommittedMetadata,
 }
+impl Bead {
+    /// Returns the hash of this bead's block header
+    pub fn hash(&self) -> BeadHash {
+        self.block_header.block_hash()
+    }
+}
 impl_consensus_encoding!(Bead, block_header, committed_metadata, uncommitted_metadata);
 
 impl Default for Bead {

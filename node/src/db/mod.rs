@@ -17,12 +17,13 @@ pub struct BeadInsertData {
 impl BeadInsertData {
     /// Resolves a bead into a [`BeadInsertData`] using the braid's index mapping.
     pub fn resolve(braid: &Braid, bead: &Bead) -> Result<Self, BraidError> {
-        let &bead_id = braid
-            .bead_index_mapping
-            .get(&braid.compute_bead_hash(bead))
-            .ok_or(BraidError::BeadNotIndexed {
-                bead: braid.compute_bead_hash(bead),
-            })?;
+        let &bead_id =
+            braid
+                .index
+                .get(&braid.compute_bead_hash(bead))
+                .ok_or(BraidError::BeadNotIndexed {
+                    bead: braid.compute_bead_hash(bead),
+                })?;
         Ok(BeadInsertData {
             parent_refs: braid.resolve_parents(bead)?,
             bead: bead.clone(),
