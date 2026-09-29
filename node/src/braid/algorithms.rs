@@ -486,10 +486,49 @@ pub fn bead_cmp(
     }
 }
 
+/// Computes the **descendant work** and **ancestor work** of every bead.
+///
+/// Descendant work of `b` is `work(b) + Σ work(descendants(b))`; ancestor work is the same
+/// quantity on the reversed DAG. [`descendant_work`] walks the cohorts it is given in reverse,
+/// so each call must receive cohorts ordered from the geneses of the graph it walks: forward
+/// cohorts for descendant work, and cohorts of the reversed DAG for ancestor work.
+///
+/// # Arguments
+///
+/// * `parents` - A reference to the `Relatives` map of bead parents.
+/// * `children` - A reference to the `Relatives` map of bead children.
+/// * `bead_work` - A reference to a `HashMap` mapping `BeadIdx` to its intrinsic `Work` value.
+///
+/// # Returns
+///
+/// A tuple `(descendant_work, ancestor_work)`.
+pub fn work_maps(
+    parents: &Relatives,
+    children: &Relatives,
+    bead_work: &HashMap<BeadIdx, Work>,
+) -> (HashMap<BeadIdx, Work>, HashMap<BeadIdx, Work>) {
+    // Cohorts from the geneses to the tips
+    let mut cohort_cache = Relatives::new();
+    let parent_cohorts = cohorts(parents, children, &geneses(parents), &mut cohort_cache);
+
+    // Cohorts of the reversed DAG, i.e. from the tips to the geneses
+    let mut desc_cohort_cache = Relatives::new();
+    let desc_cohorts = cohorts(
+        children,
+        parents,
+        &geneses(children),
+        &mut desc_cohort_cache,
+    );
+
+    let dwork = descendant_work(children, bead_work, &parent_cohorts);
+    let awork = descendant_work(parents, bead_work, &desc_cohorts);
+    (dwork, awork)
+}
+
 /// Returns a closure suitable for sorting beads by their accumulated work.
 ///
 /// This function computes the descendant and ancestor work for all relevant beads
-/// and then returns a closure (`impl Fn(&BeadIdx, &BeadIdx) -> Ordering`) that can be used
+/// (see [`work_maps`]) and then returns a closure (`impl Fn(&BeadIdx, &BeadIdx) -> Ordering`) that can be used
 /// with sorting methods (e.g., `Vec::sort_by`, `Iterator::max_by`) to order beads
 /// according to the Braidpool consensus rules.
 ///
@@ -514,18 +553,7 @@ fn work_sort_key_fn<'a>(
     bead_work: &'a HashMap<BeadIdx, Work>,
     // FIXME add descendant_cache
 ) -> impl Fn(&BeadIdx, &BeadIdx) -> Ordering + 'a {
-    // Compute cohorts for descendant work calculation
-    let mut cohort_cache = Relatives::new();
-    let geneses_set = geneses(parents);
-    let parent_cohorts = cohorts(parents, children, &geneses_set, &mut cohort_cache);
-
-    // For descendant work, we swap parents/children
-    let mut desc_cohort_cache = Relatives::new();
-    let desc_geneses_set = geneses(children);
-    let desc_cohorts = cohorts(children, parents, &desc_geneses_set, &mut desc_cohort_cache);
-
-    let dwork = descendant_work(children, bead_work, &desc_cohorts);
-    let awork = descendant_work(parents, bead_work, &parent_cohorts);
+    let (dwork, awork) = work_maps(parents, children, bead_work);
 
     move |a: &BeadIdx, b: &BeadIdx| bead_cmp(*a, *b, &dwork, &awork)
 }
@@ -557,27 +585,29 @@ fn work_sort_key_fn<'a>(
 ///
 /// # Returns
 ///
-/// A `Vec<BeadIdx>` representing the highest-work path as a sequence of bead indices from genesis to tip.
+/// `Some(path)` with the bead indices from genesis to tip, or `None` if the braid is empty
+/// (or `children` is missing a bead reachable from the geneses).
 pub fn highest_work_path(
     parents: &Relatives,
     children: &Relatives,
     bead_work: &HashMap<BeadIdx, Work>,
     // FIXME add descendant_cache
-) -> Vec<BeadIdx> {
+) -> Option<Vec<BeadIdx>> {
+    if parents.is_empty() {
+        return None;
+    }
     let sort_key_fn = work_sort_key_fn(parents, children, bead_work);
-    let mut hwpath = vec![*geneses(parents)
-        .iter()
-        .max_by(|a, b| sort_key_fn(a, b))
-        .unwrap()];
+    let mut current = *geneses(parents).iter().max_by(|a, b| sort_key_fn(a, b))?;
+    let mut hwpath = vec![current];
 
     let dag_tips = tips(children);
-    while !dag_tips.contains(hwpath.last().unwrap()) {
-        let max_child = children[hwpath.last().unwrap()]
+    while !dag_tips.contains(&current) {
+        current = *children
+            .get(&current)?
             .iter()
-            .max_by(|a, b| sort_key_fn(a, b))
-            .unwrap();
-        hwpath.push(*max_child);
+            .max_by(|a, b| sort_key_fn(a, b))?;
+        hwpath.push(current);
     }
 
-    hwpath
+    Some(hwpath)
 }
