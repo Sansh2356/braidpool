@@ -57,7 +57,8 @@ pub enum BeadMessage {
 pub enum ExtendStrategy {
     /// Optimized heuristic approach (default)
     Heuristic,
-    /// Original approach but maintaining cache (incremental cache + algorithms::cohorts)
+    /// Recomputes cohorts with `algorithms::cohorts`, starting from the head of the earliest
+    /// cohort that holds a parent of the new bead; earlier cohorts are kept as they are.
     Cached,
     /// Original unoptimized approach (clear cache + algorithms::cohorts)
     NoCache,
@@ -579,49 +580,28 @@ impl Braid {
                 self.rebuild_suffix(rebuild_start);
             }
             ExtendStrategy::Cached => {
-                // Determine earliest cohort that includes any parent (with a small backstep for internal links)
-                let start_cohort_idx = if self.cohorts.is_empty() || bead_parents.is_empty() {
-                    0
-                } else {
-                    let mut idx = 0;
-                    for (i, cohort) in self.cohorts.iter().enumerate() {
-                        if cohort.iter().any(|p| bead_parents.contains(p)) {
-                            idx = i;
-                            break;
-                        }
+                // Cuts before the earliest cohort holding a parent stay valid: the new bead
+                // descends from that parent, which already descends from every earlier cohort.
+                let start_cohort_idx = self
+                    .cohorts
+                    .iter()
+                    .position(|cohort| cohort.iter().any(|p| bead_parents.contains(p)))
+                    .unwrap_or(0);
+
+                // Restart from the head of that cohort (its beads with no parent inside it).
+                // Passing the whole cohort would blank the ancestry between its own beads and
+                // hide the cuts that follow it.
+                let head = match self.cohorts.get(start_cohort_idx) {
+                    Some(cohort) => {
+                        algorithms::geneses(&algorithms::sub_braid(cohort, &self.parents))
                     }
-                    if idx > 0 {
-                        let cohort = &self.cohorts[idx];
-                        let has_internal_links = cohort.iter().any(|&b| {
-                            self.parents
-                                .get(&b)
-                                .map_or(false, |parents| parents.iter().any(|p| cohort.contains(p)))
-                        });
-                        if has_internal_links {
-                            idx -= 1;
-                        }
-                    }
-                    idx
+                    None => algorithms::geneses(&self.parents),
                 };
 
-                let initial_cohort = self
-                    .cohorts
-                    .get(start_cohort_idx)
-                    .cloned()
-                    .unwrap_or_else(|| algorithms::geneses(&self.parents));
-
-                if start_cohort_idx < self.cohorts.len() {
-                    self.cohorts.truncate(start_cohort_idx);
-                }
-
+                self.cohorts.truncate(start_cohort_idx);
                 let mut scratch = Relatives::new();
-                let new_cohorts = algorithms::cohorts(
-                    &self.parents,
-                    &self.children,
-                    &initial_cohort,
-                    &mut scratch,
-                );
-
+                let new_cohorts =
+                    algorithms::cohorts(&self.parents, &self.children, &head, &mut scratch);
                 self.cohorts.extend(new_cohorts);
                 self.rebuild_suffix(start_cohort_idx);
             }
@@ -730,10 +710,14 @@ impl Braid {
 
         tracing::debug!(smallest_cohort_index, "Starting from cohort index");
 
-        // Collect beads from the smallest cohort onward, excluding old tips
+        // Collect beads from the smallest cohort onward, excluding old tips. Beads within a
+        // cohort are sorted by index: a bead is only indexed after its parents, so this is a
+        // deterministic topological order the receiver can apply without parking orphans.
         let mut response_beads = Vec::new();
         for cohort in self.cohorts.iter().skip(smallest_cohort_index) {
-            for &bead_index in cohort {
+            let mut ordered: Vec<BeadIdx> = cohort.iter().copied().collect();
+            ordered.sort_unstable();
+            for bead_index in ordered {
                 let bead = &self.beads[bead_index];
                 if !old_tips_set.contains(&self.compute_bead_hash(bead)) {
                     response_beads.push(bead.clone());
@@ -821,7 +805,8 @@ mod genesis_tests {
             &mut scratch,
         );
         assert_eq!(braid.cohorts, reference);
-        let hwp = algorithms::highest_work_path(&braid.parents, &braid.children, &braid.bead_work);
+        let hwp = algorithms::highest_work_path(&braid.parents, &braid.children, &braid.bead_work)
+            .expect("non-empty braid has a highest work path");
         assert_eq!(hwp.len(), 2);
     }
 
