@@ -732,7 +732,8 @@ impl RpcServer for RpcServerImpl {
             &braid_data.parents,
             &braid_data.children,
             &braid_data.bead_work,
-        );
+        )
+        .unwrap_or_default();
 
         let available_count = bead_indices_list.len();
 
