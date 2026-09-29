@@ -817,3 +817,8 @@ mod genesis_tests {
         assert!(braid.cohorts.is_empty());
     }
 }
+
+#[cfg(test)]
+mod algorithm_tests;
+#[cfg(test)]
+mod tests;
