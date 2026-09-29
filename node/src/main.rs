@@ -233,10 +233,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     });
     let (_rpc_addr, dashboard_notifier) = match server_join.await {
         Ok(Ok(tuple)) => tuple,
-        Ok(Err(())) => {
+        Ok(Err(error)) => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                "RPC server startup failed",
+                format!("RPC server startup failed due - {}", error),
             )
             .into());
         }
@@ -1166,7 +1166,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                              }
                                          };
                                            //If the received  bead exceeds the timestamp of ibd completion wrt to a sync node
-                                           if let braid::AddBeadStatus::ParentsNotYetReceived = status {
+                                           if let braid::AddBeadStatus::ParentsMissing | braid::AddBeadStatus::ParentsNotYetReceived = status {
                                              //request the parents using request response protocol
                                              let peer_id = {
                                                 let peer_manager = peer_manager_arc.read().await;
@@ -1227,7 +1227,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                              if broadcast_ts  < threshold as u32 {
                                                  info!("Incoming BEAD received during IBD within threshold limit with broadcast timestamp - {:?} and threshold is - {:?}",broadcast_ts,threshold);
                                                 match status{
-                                                 braid::AddBeadStatus::InvalidBead | braid::AddBeadStatus::ParentsNotYetReceived=>{
+                                                 braid::AddBeadStatus::InvalidBead | braid::AddBeadStatus::ParentsNotYetReceived | braid::AddBeadStatus::ParentsMissing=>{
                                                      //Aborting/evicting the wait_ibd handler corresponding to the sync peer
                                                      match ibd_command_tx.send(IBDCommands::AbortWaitHandle { peer_id:sync_peer_id }).await{
                                                          Ok(_)=>{
@@ -1248,7 +1248,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                      }
                                                      continue;
                                                  },
-                                                 braid::AddBeadStatus::BeadAdded { .. } | braid::AddBeadStatus::DagAlreadyContainsBead =>{
+                                                 braid::AddBeadStatus::BeadAdded { .. } | braid::AddBeadStatus::DagAlreadyContainsBead | braid::AddBeadStatus::DuplicateBead =>{
                                                      ibd_spinlock.store(false,Ordering::SeqCst);
                                                      continue;
                                                  },
@@ -1262,7 +1262,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     }
                                 }
                                 else{
-                                    if let braid::AddBeadStatus::ParentsNotYetReceived = status {
+                                    if let braid::AddBeadStatus::ParentsMissing | braid::AddBeadStatus::ParentsNotYetReceived = status {
                                         //request the parents using request response protocol
                                         let peer_id = {
                                             let peer_manager = peer_manager_arc.read().await;
@@ -1475,7 +1475,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                  let braid_lock = braid.read().await;
                                                  for hash in hashes.iter() {
                                                      if let Some(&index) =
-                                                         braid_lock.bead_index_mapping.get(hash)
+                                                         braid_lock.index.get(hash)
                                                      {
                                                          if let Some(bead) = braid_lock.beads.get(index) {
                                                              beads.push(bead.clone());
@@ -1505,7 +1505,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                              {
                                                  let braid_lock = braid.read().await;
                                                  genesis = braid_lock
-                                                     .genesis_beads
+                                                     .geneses
                                                      .iter()
                                                      .filter_map(|index| braid_lock.beads.get(*index))
                                                      .cloned()
