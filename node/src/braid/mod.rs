@@ -349,7 +349,9 @@ impl Braid {
         );
         while smallest_cohort_index < self.cohorts.len() {
             let cohort = &self.cohorts[smallest_cohort_index];
-            for bead_index in &cohort.0 {
+            let mut cohort_indices: Vec<usize> = cohort.0.iter().copied().collect();
+            cohort_indices.sort_by_key(|&idx| self.beads[idx].block_header.block_hash());
+            for bead_index in &cohort_indices {
                 let curr_bead = self.beads[*bead_index].clone();
                 //Not including the beads that are already present in old_tips
                 if !old_tips.contains(&self.compute_bead_hash(&curr_bead)) {
@@ -995,7 +997,7 @@ pub mod consensus_functions {
     /// The comparison follows a strict priority:
     /// 1. **Descendant Work** (`dwork`)
     /// 2. **Ancestor Work** (`awork`)
-    /// 3. **Bead Index** (in reverse; i.e., smaller index wins last)
+    /// 3. **Bead Hash** (in reverse; i.e., smaller hash wins the tie)
     ///
     /// This comparator is designed to be used in sorting and priority queues where
     /// consensus-based ordering of beads is necessary (e.g., tip selection, leader election).
@@ -1012,6 +1014,7 @@ pub mod consensus_functions {
     /// An `Ordering` (`Less`, `Greater`, or `Equal`) indicating the relative ranking of bead A vs B.
     ///
     pub fn bead_cmp(
+        braid_obj: &Braid,
         a: usize,
         b: usize,
         dwork: &HashMap<usize, BigUint>,
@@ -1031,10 +1034,12 @@ pub mod consensus_functions {
             return Ok(Ordering::Greater);
         }
 
-        if a > b {
+        let a_hash = braid_obj.beads[a].block_header.block_hash();
+        let b_hash = braid_obj.beads[b].block_header.block_hash();
+        if a_hash > b_hash {
             return Ok(Ordering::Less);
         }
-        if a < b {
+        if a_hash < b_hash {
             return Ok(Ordering::Greater);
         }
 
@@ -1067,7 +1072,7 @@ pub mod consensus_functions {
     /// Sorting order uses `bead_cmp(...)`, which prioritizes:
     /// - Descendant Work
     /// - Ancestor Work
-    /// - Bead Index (reverse order)
+    /// - Bead Hash (reverse order)
     pub fn highest_work_path(
         braid_obj: &Braid,
         parents: &HashMap<usize, HashSet<usize>>,
@@ -1096,7 +1101,9 @@ pub mod consensus_functions {
         //getting the maxima out of the genesis beads
         let max_gensis_bead = genesis_beads
             .iter()
-            .max_by(|a, b| bead_cmp(**a, **b, &descendant_work_braid, &ancestor_work).unwrap())
+            .max_by(|a, b| {
+                bead_cmp(braid_obj, **a, **b, &descendant_work_braid, &ancestor_work).unwrap()
+            })
             .ok_or(HighestWorkBeadFetchFailed)
             .unwrap();
         //populating the highest work path with indices representing the beads involved from the
@@ -1114,7 +1121,9 @@ pub mod consensus_functions {
             //getting the maximum via comparator
             let max_bead = current_bead_children_set
                 .iter()
-                .max_by(|a, b| bead_cmp(**a, **b, &descendant_work_braid, &ancestor_work).unwrap())
+                .max_by(|a, b| {
+                    bead_cmp(braid_obj, **a, **b, &descendant_work_braid, &ancestor_work).unwrap()
+                })
                 .ok_or(HighestWorkBeadFetchFailed)
                 .unwrap();
             highest_work_path.push(*max_bead);
