@@ -170,6 +170,14 @@ impl PoolNetwork {
             Self::Bitcoin(_) => header.block_hash(),
         }
     }
+
+    /// Returns the hash of this network's Bitcoin genesis block.
+    pub fn genesis_block_hash(&self) -> BlockHash {
+        match self {
+            Self::Cpunet => Cpunet::block_hash(&Cpunet::genesis_header()),
+            Self::Bitcoin(network) => bitcoin::constants::genesis_block(*network).block_hash(),
+        }
+    }
 }
 
 impl fmt::Display for PoolNetwork {

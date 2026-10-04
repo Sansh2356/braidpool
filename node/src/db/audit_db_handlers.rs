@@ -299,6 +299,36 @@ impl AuditDBHandler {
         Ok(tips)
     }
 
+    /// Returns the block hash of the audit genesis bead, the earliest persisted bead that has
+    /// no parents, or `None` if the database holds no such bead.
+    pub async fn get_genesis_hash(&self) -> Result<Option<BlockHash>, DBErrors> {
+        let pool = &self.db_connection_pool;
+        let block_hash = sqlx::query_scalar::<_, Vec<u8>>(
+            r#"
+            SELECT ab.block_hash FROM AuditBead ab
+            WHERE NOT EXISTS (SELECT 1 FROM AuditBeadParent p WHERE p.child_id = ab.id)
+            ORDER BY ab.id ASC LIMIT 1
+            "#,
+        )
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| DBErrors::TupleNotFetched {
+            error: format!("Failed to fetch audit genesis bead: {}", e),
+        })?;
+
+        block_hash
+            .map(|bytes| {
+                bytes
+                    .try_into()
+                    .map(BlockHash::from_byte_array)
+                    .map_err(|_| DBErrors::TupleAttributeParsingError {
+                        error: "Expected 32 bytes".to_string(),
+                        attribute: "block_hash".to_string(),
+                    })
+            })
+            .transpose()
+    }
+
     pub async fn get_bead_by_composite_hash(
         &self,
         composite_hash: &BlockHash,
