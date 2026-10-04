@@ -1,3 +1,9 @@
+#[cfg(test)]
+use crate::{bead::Bead, utils::BeadHash};
+
+#[cfg(test)]
+pub use crate::braid::{BeadIdx, BeadSet, BeadWork, Cohort, CohortIdx, Relatives};
+
 // A macro for making parents and children relationships for testing like:
 // parents: relatives!(0 => [], 1 => [0])
 #[macro_export]
@@ -10,10 +16,95 @@ macro_rules! relatives {
     };
 }
 
+// A macro for making a BeadSet for testing like:
+// my_beadset = beadset![0,1,2]
 #[cfg(test)]
-use super::BeadHash;
+#[macro_export]
+macro_rules! beadset {
+    ($($x:expr),* $(,)?) => {{
+        use crate::braid::BeadSet;
+        BeadSet::from([$($x),*])
+    }};
+}
+
+// A macro for making a list of cohorts for testing like:
+// my_cohorts = cohorts!([0], [1,2], [3])
 #[cfg(test)]
-use crate::bead::Bead;
+#[macro_export]
+macro_rules! cohorts {
+    ($($set:expr),* $(,)?) => {{
+        use crate::braid::BeadSet;
+        vec![$(BeadSet::from($set)),*]
+    }};
+}
+// A macro for creating test braids like:
+// let braid = make_test_braid!(0 => [], 1 => [0], 2 => [0, 1]);
+#[cfg(test)]
+#[macro_export]
+macro_rules! make_test_braid {
+    ($($k:expr => [$($v:expr),*]),* $(,)?) => {{
+        use std::collections::{HashMap, VecDeque};
+        use crate::braid::{Bead, BeadIdx, BeadSet, Relatives};
+
+        // Build parent mapping using Relatives type
+        let parents: Relatives = Relatives::from([
+            $(($k, [$($v),*].into_iter().collect::<BeadSet>()),)*
+        ]);
+
+        // Create beads in topological order
+        let mut beads_to_idx: HashMap<BeadIdx, Bead> = HashMap::new();
+        let mut remaining: BeadSet = parents.keys().copied().collect();
+        let mut queue: VecDeque<BeadIdx> = VecDeque::new();
+
+        // Start with genesis beads (no parents)
+        for (&idx, parent_indices) in &parents {
+            if parent_indices.is_empty() {
+                queue.push_back(idx);
+            }
+        }
+
+        // Process beads in topological order
+        while let Some(idx) = queue.pop_front() {
+            if !remaining.contains(&idx) {
+                continue;
+            }
+
+            let parent_indices = &parents[&idx];
+
+            // Check if all parents have been created
+            let all_parents_ready = parent_indices.iter().all(|p| beads_to_idx.contains_key(p));
+
+            if all_parents_ready {
+                // Create bead with parent references
+                let parent_refs: Vec<&Bead> = parent_indices
+                    .iter()
+                    .map(|parent_idx| &beads_to_idx[parent_idx])
+                    .collect();
+                beads_to_idx.insert(idx, crate::utils::test_utils::emit_Bead(&parent_refs));
+                remaining.remove(&idx);
+
+                // Add children to queue
+                for (&child_idx, child_parents) in &parents {
+                    if remaining.contains(&child_idx) && child_parents.contains(&idx) {
+                        queue.push_back(child_idx);
+                    }
+                }
+            } else {
+                // Re-queue if parents aren't ready yet
+                queue.push_back(idx);
+            }
+        }
+
+        // Create beads vector in order (0, 1, 2, ...)
+        let max_idx = parents.keys().copied().max().unwrap_or(0 as BeadIdx);
+        let beads_vector: Vec<Bead> = (0..=max_idx)
+            .map(|i| beads_to_idx[&i].clone())
+            .collect();
+
+        // Create and return the braid
+        crate::braid::Braid::new(beads_vector, crate::config::PoolNetwork::Cpunet)
+    }};
+}
 #[cfg(test)]
 use crate::committed_metadata::CommittedMetadata;
 #[cfg(test)]
@@ -23,38 +114,26 @@ use crate::config::PoolNetwork;
 #[cfg(test)]
 use crate::uncommitted_metadata::UnCommittedMetadata;
 #[cfg(test)]
+use crate::utils::compute_block_hash;
+#[cfg(test)]
+use crate::utils::timestamp::MicrosecondTimestamp;
+#[cfg(test)]
 use bitcoin::block::Header as BlockHeader;
 #[cfg(test)]
 pub use bitcoin::ecdsa::Signature;
 #[cfg(test)]
-pub use bitcoin::{absolute::Time, p2p::address::AddrV2, PublicKey, Transaction};
+pub use bitcoin::{absolute::Time, p2p::address::AddrV2, Transaction};
 #[cfg(test)]
-use std::{
-    collections::{HashMap, HashSet},
-    str::FromStr,
-};
+use std::{collections::HashMap, str::FromStr};
 
-#[cfg(test)]
-use bitcoin::secp256k1::{Message, Secp256k1, SecretKey};
 #[cfg(test)]
 use bitcoin::Txid;
-#[cfg(test)]
-use bitcoin::{
-    block::Version as BlockVersion, hashes::Hash, BlockHash, CompactTarget, EcdsaSighashType,
-    TxMerkleNode,
-};
-#[cfg(test)]
-use rand::{rngs::OsRng, RngCore};
-#[cfg(test)]
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 #[cfg(test)]
-use crate::utils::timestamp::MicrosecondTimestamp;
-#[cfg(test)]
-use crate::{braid::Braid, utils::compute_block_hash};
+use crate::braid::Braid;
 
 // JSONBraid structure for loading test data from JSON files with HashSet for algorithm compatibility
-#[cfg(test)]
 #[derive(Clone, Debug, Deserialize)]
 pub struct JSONBraid {
     pub description: String,
@@ -62,7 +141,7 @@ pub struct JSONBraid {
     pub children: crate::braid::Relatives,
     pub geneses: crate::braid::BeadSet,
     pub tips: crate::braid::BeadSet,
-    pub cohorts: Vec<crate::braid::BeadSet>,
+    pub cohorts: Vec<crate::braid::Cohort>,
     // this is populated in the test files but always 1. TODO: improve tests with different work
     // per bead to further exercise hwpath and descendant_work
     #[allow(unused)]
@@ -86,7 +165,7 @@ impl JSONBraid {
     pub fn tests() -> Box<dyn Iterator<Item = (JSONBraid, String)>> {
         // Get the project root directory from Cargo's environment variable
         let project_root = env!("CARGO_MANIFEST_DIR");
-        let test_dir = format!("{}/../{}", project_root, BRAIDTESTDIRECTORY);
+        let test_dir = format!("{}/../{}", project_root, BRAID_TEST_DIR);
 
         let dir_entries = std::fs::read_dir(&test_dir)
             .unwrap_or_else(|e| panic!("Failed to read test directory '{}': {}", test_dir, e));
@@ -121,110 +200,81 @@ impl JSONBraid {
 
         Box::new(test_files.into_iter())
     }
-}
 
-#[cfg(test)]
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct FileBraid {
-    pub description: String,
-    pub parents: HashMap<usize, Vec<usize>>,
-    pub children: HashMap<usize, Vec<usize>>,
-    pub geneses: Vec<usize>,
-    pub tips: Vec<usize>,
-    pub cohorts: Vec<Vec<usize>>,
-    pub bead_work: HashMap<usize, u32>,
-    pub work: HashMap<usize, u32>,
-    pub highest_work_path: Vec<usize>,
-}
+    /// Create a Braid object from this JSONBraid data structure
+    #[cfg(test)]
+    #[allow(non_snake_case)] // the upper case Braid name is intentional because that's the
+                             // class returned.
+    pub fn make_Braid(&self) -> Braid {
+        use crate::braid::Braid;
+        use std::collections::VecDeque;
 
-#[cfg(test)]
-pub const BRAIDTESTDIRECTORY: &str = "tests/braids";
-#[cfg(test)]
-pub fn loading_braid_from_file(file_path: &str) -> (Braid, FileBraid) {
-    use std::collections::HashMap;
+        // Create beads in topological order to ensure parent hashes are consistent
+        let mut beads_to_idx: HashMap<crate::braid::BeadIdx, Bead> = HashMap::new();
+        let mut remaining: std::collections::HashSet<crate::braid::BeadIdx> =
+            self.parents.keys().copied().collect();
+        let mut queue: VecDeque<crate::braid::BeadIdx> = VecDeque::new();
 
-    use num::range;
-
-    use crate::braid::{Braid, Cohort};
-
-    let current_file_path = file_path;
-    let file_content = std::fs::read_to_string(current_file_path).unwrap();
-    let file_braid: FileBraid = serde_json::from_str(&file_content).unwrap();
-    let mut beads_to_idx: HashMap<usize, Bead> = HashMap::new();
-    let mut test_braid_vector_bead_mapping: HashMap<BeadHash, usize> = HashMap::new();
-    for bead_idx in file_braid.clone().parents {
-        let random_test_bead = emit_bead();
-        test_braid_vector_bead_mapping.insert(
-            compute_block_hash(&random_test_bead.clone().block_header, PoolNetwork::Cpunet),
-            bead_idx.0,
-        );
-        beads_to_idx.insert(bead_idx.0, random_test_bead.clone());
-    }
-    let mut test_braid_parents_map: HashMap<usize, HashSet<usize>> = HashMap::new();
-    for (idx, bead) in beads_to_idx.clone() {
-        let mut current_bead = bead;
-        let mut parent_idx_set: HashSet<usize> = HashSet::new();
-        if let Some(current_bead_parents) = file_braid.parents.get(&idx) {
-            for parent_bead_idx in current_bead_parents {
-                let parent_bead_block_hash = compute_block_hash(
-                    &beads_to_idx[parent_bead_idx].block_header,
-                    PoolNetwork::Cpunet,
-                );
-                current_bead
-                    .committed_metadata
-                    .parents
-                    .push(parent_bead_block_hash);
-
-                parent_idx_set.insert(*parent_bead_idx);
+        // Start with genesis beads (no parents)
+        for (&idx, parents) in &self.parents {
+            if parents.is_empty() {
+                queue.push_back(idx);
             }
         }
-        test_braid_parents_map.insert(idx, parent_idx_set);
-        beads_to_idx.insert(idx, current_bead);
-    }
-    let mut beads_vector: Vec<Bead> = Vec::new();
-    for bead_index_number in range(0, file_braid.parents.len()) {
-        beads_vector.push(beads_to_idx[&bead_index_number].clone());
-    }
-    let mut current_braid_genesis: HashSet<usize> = HashSet::new();
-    let mut current_braid_tips: HashSet<usize> = HashSet::new();
-    let mut current_bead_cohorots: Vec<Cohort> = Vec::new();
-    for genesis_bead_idx in file_braid.geneses.clone() {
-        current_braid_genesis.insert(genesis_bead_idx);
-    }
-    for tips_bead_idx in file_braid.tips.clone() {
-        current_braid_tips.insert(tips_bead_idx);
-    }
-    for cohort in file_braid.cohorts.clone() {
-        use crate::braid::Cohort;
 
-        let mut current_cohort_indices: HashSet<usize> = HashSet::new();
-        for cohort_bead_idx in cohort {
-            current_cohort_indices.insert(cohort_bead_idx);
+        // Process beads in topological order
+        while let Some(idx) = queue.pop_front() {
+            if !remaining.contains(&idx) {
+                continue;
+            }
+
+            let parent_indices = &self.parents[&idx];
+
+            // Check if all parents have been created
+            let all_parents_ready = parent_indices.iter().all(|p| beads_to_idx.contains_key(p));
+
+            if all_parents_ready {
+                // Create bead with parent references
+                let parent_refs: Vec<&Bead> = parent_indices
+                    .iter()
+                    .map(|parent_idx| &beads_to_idx[parent_idx])
+                    .collect();
+                beads_to_idx.insert(idx, emit_Bead(&parent_refs));
+                remaining.remove(&idx);
+
+                // Add children to queue
+                for (&child_idx, child_parents) in &self.parents {
+                    if remaining.contains(&child_idx) && child_parents.contains(&idx) {
+                        queue.push_back(child_idx);
+                    }
+                }
+            } else {
+                // Re-queue if parents aren't ready yet
+                queue.push_back(idx);
+            }
         }
-        current_bead_cohorots.push(Cohort(current_cohort_indices));
+
+        // Create beads vector in order
+        let beads_vector: Vec<Bead> = (0..self.parents.len())
+            .map(|i| beads_to_idx[&i].clone())
+            .collect();
+
+        // Let Braid::new handle all the complex parent/children mapping,
+        // tip/genesis detection, and cohort computation
+        Braid::new(beads_vector, PoolNetwork::Cpunet)
     }
-    //constructing actual braid object from file-braid object
-    (
-        Braid {
-            beads: beads_vector,
-            bead_index_mapping: test_braid_vector_bead_mapping,
-            tips: current_braid_tips,
-            genesis_beads: current_braid_genesis,
-            cohorts: current_bead_cohorots,
-            cohort_tips: vec![HashSet::new()], // Cohorts tips are only used in extend(), so we can skip them here.
-            orphan_beads: Vec::new(),
-            network: PoolNetwork::Cpunet,
-        },
-        file_braid.clone(),
-    )
 }
+
+/// Directory containing braid test files (relative to project root)
+#[cfg(test)]
+pub const BRAID_TEST_DIR: &str = "tests/braids";
 
 #[cfg(test)]
 pub struct TestUnCommittedMetadataBuilder {
     extra_nonce_1: u64,
     extra_nonce_2: u64,
     broadcast_timestamp: Option<MicrosecondTimestamp>,
-    signature: Option<Signature>,
+    signature: Option<bitcoin::ecdsa::Signature>,
 }
 
 #[cfg(test)]
@@ -400,6 +450,9 @@ impl TestBeadBuilder {
         }
     }
 }
+
+#[cfg(test)]
+use rand::RngCore;
 #[cfg(test)]
 fn generate_random_public_key_string() -> String {
     let secp = &Secp256k1::new();
@@ -408,24 +461,44 @@ fn generate_random_public_key_string() -> String {
 }
 
 #[cfg(test)]
-pub fn emit_bead() -> Bead {
-    // This function creates a random bead for testing purposes.
+use std::sync::atomic::{AtomicU32, Ordering};
+// Static counter for unique nonce generation across all beads
+#[cfg(test)]
+static NONCE_COUNTER: AtomicU32 = AtomicU32::new(1);
+
+#[cfg(test)]
+use bitcoin::secp256k1::{Message, Secp256k1, SecretKey};
+#[cfg(test)]
+use bitcoin::{
+    block::Version as BlockVersion, hashes::Hash, BlockHash, CompactTarget, EcdsaSighashType,
+    PublicKey, TxMerkleNode,
+};
+#[cfg(test)]
+use rand::rngs::OsRng;
+#[cfg(test)]
+#[allow(non_snake_case)]
+pub fn emit_Bead(parents: &[&crate::bead::Bead]) -> crate::bead::Bead {
+    // This function creates a random bead for testing purposes with the provided parents.
 
     let random_public_key = generate_random_public_key_string()
         .parse::<bitcoin::PublicKey>()
         .expect("An error occurred while generating Secret key rand bytes");
     // Generate a reasonable timestamp (between 2020-01-01 and now)
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as u32;
-    let current_time = MicrosecondTimestamp::from_secs(now);
+    let now = std::time::SystemTime::now();
+    let current_time =
+        MicrosecondTimestamp::from_system_time(now).expect("SystemTime should be after Unix epoch");
 
     let _address = String::from("127.0.0.1:8888");
     let public_key = random_public_key;
     let socket: String = String::from("127.0.0.1");
     let time_hash_set = TimeVec(Vec::new());
-    let parent_hash_set: Vec<BlockHash> = Vec::new();
+
+    // Test braids are built on cpunet, so parents are committed by their cpunet hash
+    let parent_hash_set: Vec<BlockHash> = parents
+        .iter()
+        .map(|&bead| compute_block_hash(&bead.block_header, PoolNetwork::Cpunet))
+        .collect();
+
     let weak_target = CompactTarget::from_unprefixed_hex("1d00ffff").unwrap();
     let min_target = CompactTarget::from_unprefixed_hex("1d00ffff").unwrap();
     let time_val = current_time;
@@ -445,7 +518,7 @@ pub fn emit_bead() -> Bead {
     let extra_nonce_1 = rand::random::<u64>();
     let extra_nonce_2 = rand::random::<u64>();
 
-    let secp = bitcoin::secp256k1::Secp256k1::new();
+    let secp = Secp256k1::new();
 
     // Generate random secret key
     let mut rng = OsRng::default();
@@ -479,7 +552,7 @@ pub fn emit_bead() -> Bead {
         version: BlockVersion::TWO,
         prev_blockhash: BlockHash::from_byte_array(bytes),
         bits: CompactTarget::from_consensus(486604799),
-        nonce: rand::random::<u32>(),
+        nonce: NONCE_COUNTER.fetch_add(1, Ordering::SeqCst),
         time: 0,
         merkle_root: TxMerkleNode::from_byte_array(bytes),
     };
