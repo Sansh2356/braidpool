@@ -111,8 +111,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let datadir_path = resolve_datadir(&args.datadir)?;
     // Initializing the braid object with read write lock
     //for supporting concurrent readers and single writer
-    let braid: Arc<RwLock<braid::Braid>> =
-        Arc::new(RwLock::new(braid::Braid::new(Vec::from([]), network)));
+    let braid: Arc<RwLock<braid::Braid>> = Arc::new(RwLock::new(braid::Braid::new(
+        Bead::genesis(network),
+        network,
+    )));
     let mut optional_db_pool = None;
     let db_tx;
 
@@ -138,18 +140,64 @@ async fn main() -> Result<(), Box<dyn Error>> {
         // FIXME instead we should look 144 blocks back from the bitcoin tip (1 day) and load beads
         // starting from that block as genesis
         let network_ref = network;
+        let db_tx_for_genesis = db_tx.clone();
         let initial_bead_fetch_handle = tokio::spawn(async move {
             let mut guard = braid_ref.write().await;
             let fetched_beads =
                 fetch_beads_in_batch(&db_connection_pool_ref, FETCH_BEAD_BATCH_SIZE).await?;
             info!(beads = fetched_beads.len(), "Beads loaded from DB");
-            for bead in &fetched_beads {
+            // DB ids are braid indices, so the genesis must be row 0 for its children to
+            // reference it.
+            match fetched_beads.first() {
+                None => {
+                    // Inserting genesis bead upon braid initialization to DB .
+                    let genesis = Bead::genesis(network_ref);
+                    node::db::persist_added_bead(&guard, &genesis, [], &db_tx_for_genesis)
+                        .await
+                        .map_err(|e| node::error::DBErrors::TupleNotInserted {
+                            error: format!("Genesis bead not persisted: {e:?}"),
+                        })?;
+                    info!(genesis = %guard.genesis(), "Genesis bead queued for persistence");
+                }
+                Some(first) => {
+                    let found = compute_block_hash(&first.block_header, network_ref);
+                    // Checking the first restored bead against this node's genesis bead.
+                    if found != guard.genesis() {
+                        return Err(node::error::DBErrors::GenesisMismatch {
+                            expected: guard.genesis(),
+                            found,
+                        });
+                    }
+                }
+            }
+            for (db_id, bead) in fetched_beads.iter().enumerate() {
+                let hash = compute_block_hash(&bead.block_header, network_ref);
                 let curr_bead_status = guard.extend(&bead);
-                debug!(
-                    hash = ?compute_block_hash(&bead.block_header,network_ref),
-                    status = ?curr_bead_status,
-                    "Bead inserted"
-                );
+                // Later inserts take their DB id from the braid index, so the two must agree.
+                if guard.index.get(&hash) != Some(&db_id) {
+                    return Err(node::error::DBErrors::TupleNotFetched {
+                        error: format!(
+                            "Persisted bead {hash} has DB id {db_id} but braid index {:?} ({curr_bead_status:?})",
+                            guard.index.get(&hash)
+                        ),
+                    });
+                }
+                match curr_bead_status {
+                    braid::AddBeadStatus::BeadAdded { .. } => {
+                        debug!(hash = ?hash, status = ?curr_bead_status, "Bead inserted");
+                    }
+                    // The genesis is row 0 and the braid already holds it.
+                    braid::AddBeadStatus::DuplicateBead if hash == guard.genesis() => {
+                        debug!(hash = ?hash, status = ?curr_bead_status, "Bead inserted");
+                    }
+                    _ => {
+                        return Err(node::error::DBErrors::TupleNotFetched {
+                            error: format!(
+                                "Persisted bead {hash} was not connected to the braid: {curr_bead_status:?}"
+                            ),
+                        });
+                    }
+                }
             }
             Ok::<(), node::error::DBErrors>(())
         });
@@ -157,8 +205,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         match initial_bead_fetch_handle.await {
             Ok(Ok(())) => info!("Initial bead fetch completed successfully"),
             Ok(Err(e)) => {
-                error!(error = ?e, "Failed to fetch beads from DB during startup");
-                return Err(format!("Database bead fetch failed: {:?}", e).into());
+                error!(error = %e, "Failed to fetch beads from DB during startup");
+                return Err(format!("Database bead fetch failed: {}", e).into());
             }
             Err(e) => {
                 return Err(format!("Initial bead fetch task failed: {}", e).into());
@@ -233,10 +281,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     });
     let (_rpc_addr, dashboard_notifier) = match server_join.await {
         Ok(Ok(tuple)) => tuple,
-        Ok(Err(())) => {
+        Ok(Err(error)) => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                "RPC server startup failed",
+                format!("RPC server startup failed due - {}", error),
             )
             .into());
         }
@@ -1166,7 +1214,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                              }
                                          };
                                            //If the received  bead exceeds the timestamp of ibd completion wrt to a sync node
-                                           if let braid::AddBeadStatus::ParentsNotYetReceived = status {
+                                           if let braid::AddBeadStatus::ParentsMissing = status {
                                              //request the parents using request response protocol
                                              let peer_id = {
                                                 let peer_manager = peer_manager_arc.read().await;
@@ -1227,7 +1275,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                              if broadcast_ts  < threshold as u32 {
                                                  info!("Incoming BEAD received during IBD within threshold limit with broadcast timestamp - {:?} and threshold is - {:?}",broadcast_ts,threshold);
                                                 match status{
-                                                 braid::AddBeadStatus::InvalidBead | braid::AddBeadStatus::ParentsNotYetReceived=>{
+                                                 braid::AddBeadStatus::InvalidBead | braid::AddBeadStatus::ParentsMissing=>{
                                                      //Aborting/evicting the wait_ibd handler corresponding to the sync peer
                                                      match ibd_command_tx.send(IBDCommands::AbortWaitHandle { peer_id:sync_peer_id }).await{
                                                          Ok(_)=>{
@@ -1248,7 +1296,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                      }
                                                      continue;
                                                  },
-                                                 braid::AddBeadStatus::BeadAdded { .. } | braid::AddBeadStatus::DagAlreadyContainsBead =>{
+                                                 braid::AddBeadStatus::BeadAdded { .. } | braid::AddBeadStatus::DuplicateBead =>{
                                                      ibd_spinlock.store(false,Ordering::SeqCst);
                                                      continue;
                                                  },
@@ -1262,7 +1310,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     }
                                 }
                                 else{
-                                    if let braid::AddBeadStatus::ParentsNotYetReceived = status {
+                                    if let braid::AddBeadStatus::ParentsMissing = status {
                                         //request the parents using request response protocol
                                         let peer_id = {
                                             let peer_manager = peer_manager_arc.read().await;
@@ -1475,7 +1523,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                  let braid_lock = braid.read().await;
                                                  for hash in hashes.iter() {
                                                      if let Some(&index) =
-                                                         braid_lock.bead_index_mapping.get(hash)
+                                                         braid_lock.index.get(hash)
                                                      {
                                                          if let Some(bead) = braid_lock.beads.get(index) {
                                                              beads.push(bead.clone());
@@ -1501,17 +1549,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                              swarm.behaviour_mut().respond_with_tips(channel, tips);
                                      }
                                      BeadRequest::GetGenesis => {
-                                             let genesis;
-                                             {
-                                                 let braid_lock = braid.read().await;
-                                                 genesis = braid_lock
-                                                     .genesis_beads
-                                                     .iter()
-                                                     .filter_map(|index| braid_lock.beads.get(*index))
-                                                     .cloned()
-                                                     .map(|bead| braid_lock.compute_bead_hash(&bead))
-                                                     .collect();
-                                             }
+                                             let genesis = vec![braid.read().await.genesis()];
                                              swarm.behaviour_mut().respond_with_genesis(channel, genesis);
                                      }
                                      BeadRequest::GetAllBeads => {
@@ -1525,12 +1563,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 }
                                 BeadRequest::GetBeadsAfter(hashes) => {
                                         let braid_lock = braid.read().await;
-                                        let beads = braid_lock.get_beads_after(hashes.into());
-                                        if let Some(response_beads) = beads {
-                                            let mut computed_beads_hashes:Vec<BeadHash> = Vec::new();
-                                            for bead in response_beads.into_iter(){
-                                                computed_beads_hashes.push(braid_lock.compute_bead_hash(&bead));
-                                            }
+                                        let bead_hashes = braid_lock.get_bead_hashes_after(hashes.into());
+                                        if let Some(computed_beads_hashes) = bead_hashes {
                                             //Sending the corresponding bead hashes requested by the new peer for IBD that will
                                             //be after the new peer's `Tips`.
                                             swarm
@@ -1870,17 +1904,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                          info!(genesis=?genesis,"Received genesis beads: ");
                                          let status = {
                                              let braid_lock = braid.read().await;
-                                             braid_lock.check_genesis_beads(&genesis.0)
+                                             braid_lock.check_genesis(&genesis.0)
                                          };
                                          match status {
                                              braid::GenesisCheckStatus::GenesisBeadsValid => {
                                                  info!("Genesis beads are valid");
                                              }
-                                             braid::GenesisCheckStatus::MissingGenesisBead => {
-                                                 warn!(peer = %peer, "Missing genesis bead");
-                                                 swarm
-                                                     .behaviour_mut()
-                                                     .request_beads(peer, &genesis.0);
+                                             braid::GenesisCheckStatus::GenesisMismatch => {
+                                                 warn!(peer = %peer, genesis = ?genesis.0, "Peer has a different genesis bead");
                                              }
                                              braid::GenesisCheckStatus::GenesisBeadsCountMismatch => {
                                                  warn!(

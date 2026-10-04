@@ -1229,7 +1229,7 @@ impl DownstreamClient {
                         }
                     }
                     if parents.is_empty() {
-                        info!(worker = %worker_name, "Genesis bead, no parents exist");
+                        warn!(worker = %worker_name, "No parent beads available for this share");
                     }
                     (parents, timestamps)
                 };
@@ -3964,9 +3964,9 @@ mod test {
     pub async fn server_start_test() {
         let ibd_or_not: AtomicBool = AtomicBool::new(false);
         let test_ibd_spinlock = Arc::new(ibd_or_not);
-        let genesis_beads = Vec::from([]);
+        let genesis_bead = crate::bead::Bead::genesis(PoolNetwork::Cpunet);
         let test_braid: Arc<RwLock<braid::Braid>> = Arc::new(RwLock::new(braid::Braid::new(
-            genesis_beads,
+            genesis_bead,
             PoolNetwork::Cpunet,
         )));
         let connection_mapping = Arc::new(RwLock::new(ConnectionMapping::new()));
@@ -4043,9 +4043,9 @@ mod test {
         let ibd_or_not: AtomicBool = AtomicBool::new(false);
         let test_ibd_spinlock = Arc::new(ibd_or_not);
         let connection_mapping = Arc::new(RwLock::new(ConnectionMapping::new()));
-        let genesis_beads = Vec::from([]);
+        let genesis_bead = crate::bead::Bead::genesis(PoolNetwork::Cpunet);
         let test_braid: Arc<RwLock<braid::Braid>> = Arc::new(RwLock::new(braid::Braid::new(
-            genesis_beads,
+            genesis_bead,
             PoolNetwork::Cpunet,
         )));
         let job_store = Arc::new(Mutex::new(GlobalJobStore::new(
@@ -4106,9 +4106,9 @@ mod test {
         let ibd_or_not: AtomicBool = AtomicBool::new(false);
         let ibd_spinlock = Arc::new(ibd_or_not);
         let connection_mapping = Arc::new(RwLock::new(ConnectionMapping::new()));
-        let genesis_beads = Vec::from([]);
+        let genesis_bead = crate::bead::Bead::genesis(PoolNetwork::Cpunet);
         let test_braid: Arc<RwLock<braid::Braid>> = Arc::new(RwLock::new(braid::Braid::new(
-            genesis_beads,
+            genesis_bead,
             PoolNetwork::Cpunet,
         )));
         let job_store = Arc::new(Mutex::new(GlobalJobStore::new(
@@ -4164,9 +4164,9 @@ mod test {
         let ibd_or_not: AtomicBool = AtomicBool::new(false);
         let ibd_spinlock = Arc::new(ibd_or_not);
         let connection_mapping = Arc::new(RwLock::new(ConnectionMapping::new()));
-        let genesis_beads = Vec::from([]);
+        let genesis_bead = crate::bead::Bead::genesis(PoolNetwork::Cpunet);
         let test_braid: Arc<RwLock<braid::Braid>> = Arc::new(RwLock::new(braid::Braid::new(
-            genesis_beads,
+            genesis_bead,
             PoolNetwork::Cpunet,
         )));
         let (_test_db_handler, test_db_tx) =
@@ -4215,9 +4215,9 @@ mod test {
         let ibd_or_not: AtomicBool = AtomicBool::new(false);
         let ibd_spinlock = Arc::new(ibd_or_not);
         let connection_mapping = Arc::new(RwLock::new(ConnectionMapping::new()));
-        let genesis_beads = Vec::from([]);
+        let genesis_bead = crate::bead::Bead::genesis(PoolNetwork::Cpunet);
         let test_braid: Arc<RwLock<braid::Braid>> = Arc::new(RwLock::new(braid::Braid::new(
-            genesis_beads,
+            genesis_bead,
             PoolNetwork::Cpunet,
         )));
         let (_test_db_handler, test_db_tx) =
@@ -4317,9 +4317,9 @@ mod test {
         //   d1defd3fa999dfa36953755c690689799962b48bebd836974e8cf90000000000
         //   0000002a6a286272616964706f6f6c5f626561645f6d657461646174615f6861
         //   73685f333262010203040506070800000000
-        let genesis_beads = Vec::from([]);
+        let genesis_bead = crate::bead::Bead::genesis(PoolNetwork::Cpunet);
         let test_braid: Arc<RwLock<braid::Braid>> = Arc::new(RwLock::new(braid::Braid::new(
-            genesis_beads,
+            genesis_bead,
             PoolNetwork::Cpunet,
         )));
         let (_test_db_handler, test_db_tx) =
@@ -4573,7 +4573,10 @@ mod test {
         let mut client = DownstreamClient::new(PoolNetwork::Cpunet);
         client.authorized = true;
         client.extranonce1 = vec![0u8; 8];
-        let test_braid = Arc::new(RwLock::new(braid::Braid::new(vec![], PoolNetwork::Cpunet)));
+        let test_braid = Arc::new(RwLock::new(braid::Braid::new(
+            crate::bead::Bead::genesis(PoolNetwork::Cpunet),
+            PoolNetwork::Cpunet,
+        )));
         let (_db, db_tx) = DBHandler::new_in_memory(PoolNetwork::Cpunet).await.unwrap();
         let (swarm, _rx) = SwarmHandler::new(test_braid, db_tx, DashboardEvents::new());
         let swarm_arc = Arc::new(Mutex::new(swarm));
