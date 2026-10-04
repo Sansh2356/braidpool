@@ -76,6 +76,16 @@ impl Cpunet {
 
         BlockHash::from_byte_array(sha256d::Hash::from_engine(engine).to_byte_array())
     }
+
+    /// Returns the header of the cpunet genesis block: the testnet4 genesis header with
+    /// cpunet's own time and nonce.
+    pub fn genesis_header() -> Header {
+        let mut header =
+            bitcoin::constants::genesis_block(bitcoin::params::Params::TESTNET4).header;
+        header.time = 1723652721;
+        header.nonce = 961348305;
+        header
+    }
 }
 
 impl fmt::Display for Cpunet {
@@ -99,7 +109,7 @@ impl FromStr for Cpunet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::{absolute::Time, constants::genesis_block, params::Params, WitnessVersion};
+    use bitcoin::WitnessVersion;
 
     #[test]
     fn cpunet_hrp_check() {
@@ -141,16 +151,12 @@ mod tests {
     }
     #[test]
     fn compute_genesis_hash_cpunet() {
-        let mut cpunet_genesis_block = genesis_block(Params::TESTNET4);
-        cpunet_genesis_block.header.time =
-            Time::from_consensus(1723652721).unwrap().to_consensus_u32();
-        cpunet_genesis_block.header.nonce = 961348305;
         let header_hash_bytes: &[u8; 32] = &[
             155, 244, 9, 169, 207, 188, 132, 171, 5, 153, 89, 228, 109, 99, 3, 243, 57, 98, 248, 5,
             188, 141, 147, 51, 119, 165, 255, 187, 0, 0, 0, 0,
         ];
         assert_eq!(
-            Cpunet::block_hash(&cpunet_genesis_block.header).as_byte_array(),
+            Cpunet::block_hash(&Cpunet::genesis_header()).as_byte_array(),
             header_hash_bytes
         );
     }

@@ -7,7 +7,6 @@ use std::{fmt, path::PathBuf};
 use tokio::sync::oneshot;
 
 #[derive(Debug)]
-//Custom error class for handling all the braid consensus errors
 pub enum BraidError {
     /// A bead's committed parent hash is not present in the braid index. This is
     /// a consensus/DAG invariant violation: a connected bead must have all of
@@ -89,10 +88,20 @@ pub enum DBErrors {
         error: String,
         url: String,
     },
+    /// The database was built on a different genesis bead than this node's predefined one
+    GenesisMismatch {
+        /// Hash of this node's genesis bead
+        expected: BeadHash,
+        /// Hash of the first bead stored in the database
+        found: BeadHash,
+    },
 }
 impl fmt::Display for DBErrors {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            DBErrors::GenesisMismatch { expected, found } => {
+                write!(f, "Database starts from genesis bead {found}, but this node's genesis is {expected}; use a fresh datadir")
+            }
             DBErrors::ConnectionUrlNotParsed { error, url } => {
                 write!(f,"Connection URL - {:?} could not be parsed for building connection configuration and initializing connection due to - {:?}",url,error)
             }

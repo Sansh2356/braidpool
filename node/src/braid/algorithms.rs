@@ -1,22 +1,38 @@
 use super::{BeadIdx, BeadSet, Cohort, Relatives};
-use bitcoin::pow::Work;
+use crate::utils::BeadHash;
+use bitcoin::hashes::Hash;
+use bitcoin::pow::{Target, Work};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 /// Helper to create Work from bytes for zero value
-fn zero_work() -> Work {
+pub(super) fn zero_work() -> Work {
     Work::from_be_bytes([0u8; 32])
 }
 
-/// Returns the set of **genesis beads** from a given Braid object.
+/// Adds two `Work` values, saturating at the maximum instead of overflowing.
+pub fn add_work(a: Work, b: Work) -> Work {
+    let (a, b) = (a.to_be_bytes(), b.to_be_bytes());
+    let mut sum = [0u8; 32];
+    let mut carry = 0u16;
+    for i in (0..32).rev() {
+        let digit = u16::from(a[i]) + u16::from(b[i]) + carry;
+        sum[i] = digit as u8;
+        carry = digit >> 8;
+    }
+    if carry != 0 {
+        Work::from_be_bytes([0xff; 32])
+    } else {
+        Work::from_be_bytes(sum)
+    }
+}
+
+/// Returns the set of **genesis beads** of a parent mapping.
 ///
 /// A **genesis bead** is defined as a bead that has no parents, i.e., it is a root node in the Braid.
 /// These beads represent the starting points in the Braidpool architecture, with no dependencies upstream.
 ///
 /// # Arguments
-///
-/// * `braid_obj` - A reference to the `Braid` object.  
-///   While not directly used in the logic here, it is included to align with interface expectations or future-proofing.
 ///
 /// * `parents` - A map from bead indices to their parent bead indices.
 ///   Each entry represents a bead and its set of parent beads.
@@ -92,28 +108,33 @@ pub fn reverse(parents: &Relatives) -> Relatives {
 ///
 /// A `BeadSet` containing all bead indices that are children of the given input beads.
 pub fn generation(beads: &BeadSet, children: &Relatives) -> BeadSet {
-    beads.iter().flat_map(|b| &children[b]).copied().collect()
+    beads
+        .iter()
+        .filter_map(|b| children.get(b))
+        .flatten()
+        .copied()
+        .collect()
 }
 
-/// Computes all ancestors for a set of beads using an iterative DFS algorithm with caching.
+/// Computes all ancestors of a bead using an iterative DFS algorithm with caching.
 ///
-/// This function calculates the complete set of **ancestors** for each bead in the input `beads` set.
+/// This function calculates the complete set of **ancestors** of `bead`, and of every ancestor
+/// it has to visit on the way.
 /// It uses an iterative Depth-First Search (DFS) approach to avoid recursion stack overflows and
 /// efficiently builds the transitive closure of ancestors.
 ///
 /// Ancestors are stored in the `ancestors` map (passed as `&mut Relatives`), where `ancestors[i]`
 /// contains all direct and transitive parent indices of bead `i`.
 ///
-/// It leverages a `cache` (`&mut Relatives`) to store and reuse previously computed ancestor sets,
-/// processing only beads whose ancestors are not already fully cached.
+/// The `ancestors` map doubles as the cache: a bead that already has an entry is not recomputed
+/// and its entry is taken as its complete ancestor set.
 /// This also helps in avoiding redundant computations across calls.
 ///
 /// # Arguments
 ///
-/// * `beads` - A `BeadSet` of bead indices for which to compute ancestors.
+/// * `bead` - The bead index for which to compute ancestors.
 /// * `parents` - A `Relatives` map from bead index to its parent bead indices.
 /// * `ancestors` - A mutable `Relatives` map to store the computed ancestors. It will be updated in-place.
-/// * `cache` - A mutable `Relatives` map used to store and retrieve cached ancestor computations.
 pub fn all_ancestors(bead: BeadIdx, parents: &Relatives, ancestors: &mut Relatives) {
     // If already computed, use cached result
     if ancestors.contains_key(&bead) {
@@ -128,23 +149,24 @@ pub fn all_ancestors(bead: BeadIdx, parents: &Relatives, ancestors: &mut Relativ
             // We've finished processing all parents, compute ancestors
             let mut current_ancestors = BeadSet::new();
 
-            // Add direct parents
             if let Some(parent_set) = parents.get(&current) {
                 current_ancestors.extend(parent_set);
-            }
 
-            // Update with ancestors of all parents
-            if let Some(parent_set) = parents.get(&current) {
+                // Update with ancestors of all parents
                 for parent_idx in parent_set {
-                    if let Some(parent_ancestors) = ancestors.get(&parent_idx) {
+                    if let Some(parent_ancestors) = ancestors.get(parent_idx) {
                         current_ancestors.extend(parent_ancestors.iter().copied());
                     }
                 }
             }
 
             // Insert into ancestors map
-            ancestors.insert(current, current_ancestors.clone());
+            ancestors.insert(current, current_ancestors);
         } else {
+            // Reached again through another child after it was computed .
+            if ancestors.contains_key(&current) {
+                continue;
+            }
             // Mark as being processed
             work_stack.push((current, true));
 
@@ -173,12 +195,12 @@ pub fn all_ancestors(bead: BeadIdx, parents: &Relatives, ancestors: &mut Relativ
 ///
 /// * `parents` - A map from bead index to its parent indices, used for ancestry traversal.
 /// * `children` - A map from bead index to its child indices. Required parameter.
-/// * `initial_cohort` - Optional starting cohort (e.g., genesis beads). If `None`, it defaults to `geneses(parents)`.
+/// * `initial_cohort` - Head of the first cohort to compute (e.g., genesis beads). If empty, it defaults to `geneses(parents)`.
 /// * `ancestor_cache` - A mutable Relatives map of ancestors. Returns only ancestors *within* the cohort.
 ///
 /// # Returns
 ///
-/// A generator that yields `Cohort`, where each set represents a **cohort** in topological order.
+/// A `Vec<Cohort>`, where each set represents a **cohort** in topological order.
 /// Each cohort is disjoint and collectively they partition the beads in the Braid by graph cuts
 pub fn cohorts(
     parents: &Relatives,
@@ -201,6 +223,8 @@ pub fn cohorts(
     loop {
         // Create a local ancestors map which lets us see cohort boundaries
         let mut ancestors = Relatives::new();
+        // Union of all the sets in `ancestors`, kept up to date as entries are added
+        let mut ancestors_union = BeadSet::new();
         // Give the head no ancestors so that the algorithm doesn't look outside this cohort
         for h in &head {
             ancestors.insert(*h, BeadSet::new());
@@ -218,7 +242,9 @@ pub fn cohorts(
             // Add children of the newly added beads so we can compute their ancestors and see if
             // they should join the cohort.
             for b in cohort.difference(&oldcohort) {
-                tail.extend(&children[b]);
+                if let Some(bchildren) = children.get(b) {
+                    tail.extend(bchildren);
+                }
             }
 
             // If there are any tips in cohort, add tips to tail
@@ -236,12 +262,14 @@ pub fn cohorts(
             for t in &tail {
                 if !ancestors.contains_key(t) {
                     all_ancestors(*t, parents, &mut ancestors);
+                    if let Some(t_ancestors) = ancestors.get(t) {
+                        ancestors_union.extend(t_ancestors);
+                    }
                 }
             }
 
             // Calculate cohort, which is the union of all ancestors
-            cohort.clear();
-            cohort.extend(ancestors.values().flatten().copied());
+            cohort.clone_from(&ancestors_union);
 
             // We've reached the end of the Braid, yield everything left as the cohort
             if dag_tips.is_subset(&cohort) {
@@ -348,13 +376,13 @@ pub fn cohort_head(cohort: &Cohort, parents: &Relatives, children: &Relatives) -
 /// This is especially useful in contexts like:
 /// - **Pruning** parts of the DAG
 /// - **Cohort isolation** for localized validation. sub_braid works on
-///     parents/children/ancestors/descendants equally well.
+///   parents/children/ancestors/descendants equally well.
 /// - Visualization of subgraphs or ancestry scopes.
 ///
 /// The result has the properties:
 ///     geneses(sub_braid(beads, parents)) == cohort_head(beads, parents)
 ///     tips(sub_braid(beads, parents)) == cohort_tail(beads, parents)
-///     cohorts(sub_braid(beads, parents)) == [beads]
+///     cohorts(sub_braid(beads, parents)) == \[beads\]
 ///
 /// # Arguments
 ///
@@ -402,41 +430,40 @@ pub fn descendant_work(
     children: &Relatives,
     bead_work: &HashMap<BeadIdx, Work>,
     cohorts: &[Cohort],
-    //FIXME add descendant_cache
 ) -> HashMap<BeadIdx, Work> {
     let mut previous_work = zero_work();
-    let rev_cohorts: Vec<super::Cohort> = cohorts.iter().rev().cloned().collect();
+    let work_of = |b: &BeadIdx| {
+        debug_assert!(bead_work.contains_key(b), "bead {b} has no work entry");
+        bead_work.get(b).copied().unwrap_or_else(zero_work)
+    };
 
     let mut retval = HashMap::new();
 
-    for cohort in rev_cohorts {
-        let sub_children = sub_braid(&cohort, children);
+    for cohort in cohorts.iter().rev() {
+        let sub_children = sub_braid(cohort, children);
         let mut sub_descendants = HashMap::new();
 
         // Compute descendants by passing children here instead of parents
         // Call for each bead in the cohort
-        for &bead in &cohort {
+        for &bead in cohort {
             all_ancestors(bead, &sub_children, &mut sub_descendants);
         }
 
-        for b in &cohort {
+        for b in cohort {
             let descendant_sum: Work = if let Some(descendants) = sub_descendants.get(b) {
-                descendants
-                    .iter()
-                    .map(|d| bead_work[d])
-                    .fold(zero_work(), |acc, w| acc + w)
+                descendants.iter().map(work_of).fold(zero_work(), add_work)
             } else {
                 zero_work()
             };
-            retval.insert(*b, previous_work + bead_work[b] + descendant_sum);
+            retval.insert(
+                *b,
+                add_work(add_work(previous_work, work_of(b)), descendant_sum),
+            );
         }
 
         // All beads in the next cohort have ALL beads in this cohort as descendants.
-        let cohort_work_sum: Work = cohort
-            .iter()
-            .map(|b| bead_work[b])
-            .fold(zero_work(), |acc, w| acc + w);
-        previous_work = previous_work + cohort_work_sum;
+        let cohort_work_sum: Work = cohort.iter().map(work_of).fold(zero_work(), add_work);
+        previous_work = add_work(previous_work, cohort_work_sum);
     }
 
     retval
@@ -447,8 +474,9 @@ pub fn descendant_work(
 /// The comparison follows a strict priority:
 /// 1.  **Descendant Work** (`dwork`): Higher descendant work takes precedence.
 /// 2.  **Ancestor Work** (`awork`): If descendant work is equal, higher ancestor work takes precedence.
-/// 3.  **Bead Index**: If both work values are equal, a smaller bead index is considered "greater"
-///     (a tie-breaking rule, often referred to as "luck" in some contexts, based on hash or identifier).
+/// 3.  **Bead Hash**: If both work values are equal, the bead with the numerically lower hash is
+///     considered "greater" ("luck"). The hash is part of the DAG content, so every node breaks
+///     the tie the same way regardless of the order it received the beads in.
 ///
 /// This comparator is designed to be used in sorting and priority queues where
 /// consensus-based ordering of beads is necessary (e.g., tip selection, highest work path determination).
@@ -459,31 +487,53 @@ pub fn descendant_work(
 /// * `b` - The `BeadIdx` of bead B.
 /// * `dwork` - A `HashMap` mapping `BeadIdx` to its total **descendant work**.
 /// * `awork` - A `HashMap` mapping `BeadIdx` to its total **ancestor work**.
+/// * `hashes` - The hash of every bead, indexed by `BeadIdx`.
 ///
 /// # Returns
 ///
 /// An `Ordering` (`Less`, `Greater`, or `Equal`) indicating the relative ranking of bead A vs B.
+/// A bead with no entry in `dwork` or `awork` counts as zero work, and one with no entry in
+/// `hashes` orders as if it had the lowest hash; either is a caller error and debug builds
+/// assert on it.
 pub fn bead_cmp(
     a: BeadIdx,
     b: BeadIdx,
     dwork: &HashMap<BeadIdx, Work>,
     awork: &HashMap<BeadIdx, Work>,
+    hashes: &[BeadHash],
 ) -> Ordering {
-    if dwork[&a] < dwork[&b] {
-        Ordering::Less // highest work
-    } else if dwork[&a] > dwork[&b] {
-        Ordering::Greater
-    } else if awork[&a] < awork[&b] {
-        Ordering::Less
-    } else if awork[&a] > awork[&b] {
-        Ordering::Greater
-    } else if a > b {
-        Ordering::Less // same work, fall back on block hash ("luck")
-    } else if a < b {
-        Ordering::Greater
-    } else {
-        Ordering::Equal
-    }
+    let work_of = |work: &HashMap<BeadIdx, Work>, x| {
+        debug_assert!(work.contains_key(&x), "bead {x} has no work entry");
+        work.get(&x).copied().unwrap_or_else(zero_work)
+    };
+    bead_cmp_by(a, b, |x| work_of(dwork, x), |x| work_of(awork, x), hashes)
+}
+
+/// Same as [`bead_cmp`], but reads each bead's descendant and ancestor work from `dwork` and
+/// `awork` instead of from precomputed maps.
+pub fn bead_cmp_by(
+    a: BeadIdx,
+    b: BeadIdx,
+    dwork: impl Fn(BeadIdx) -> Work,
+    awork: impl Fn(BeadIdx) -> Work,
+    hashes: &[BeadHash],
+) -> Ordering {
+    dwork(a)
+        .cmp(&dwork(b))
+        .then_with(|| awork(a).cmp(&awork(b)))
+        // Same work: the lower hash wins, so compare b against a
+        .then_with(|| {
+            let value = |x: BeadIdx| {
+                debug_assert!(x < hashes.len(), "bead {x} has no hash entry");
+                hashes.get(x).map(hash_value)
+            };
+            value(b).cmp(&value(a))
+        })
+}
+
+/// Interprets a bead hash as a 256-bit little-endian integer, as Bitcoin does for proof of work.
+fn hash_value(hash: &BeadHash) -> Target {
+    Target::from_le_bytes(hash.to_byte_array())
 }
 
 /// Computes the **descendant work** and **ancestor work** of every bead.
@@ -525,40 +575,10 @@ pub fn work_maps(
     (dwork, awork)
 }
 
-/// Returns a closure suitable for sorting beads by their accumulated work.
-///
-/// This function computes the descendant and ancestor work for all relevant beads
-/// (see [`work_maps`]) and then returns a closure (`impl Fn(&BeadIdx, &BeadIdx) -> Ordering`) that can be used
-/// with sorting methods (e.g., `Vec::sort_by`, `Iterator::max_by`) to order beads
-/// according to the Braidpool consensus rules.
-///
-/// The sorting criteria, applied by the internal `bead_cmp` function, prioritizes:
-/// 1. Highest Descendant Work
-/// 2. Highest Ancestor Work (if descendant work is equal)
-/// 3. Bead Index (as a tie-breaker, smaller index first)
-///
-/// # Arguments
-///
-/// * `parents` - A reference to the `Relatives` map of bead parents.
-/// * `children` - A reference to the `Relatives` map of bead children.
-/// * `bead_work` - A reference to a `HashMap` mapping `BeadIdx` to its intrinsic `Work` value.
-///
-/// # Returns
-///
-/// An `impl Fn(&BeadIdx, &BeadIdx) -> Ordering` closure that can be used to compare two beads
-/// based on their work and index according to consensus rules.
-fn work_sort_key_fn<'a>(
-    parents: &'a Relatives,
-    children: &'a Relatives,
-    bead_work: &'a HashMap<BeadIdx, Work>,
-    // FIXME add descendant_cache
-) -> impl Fn(&BeadIdx, &BeadIdx) -> Ordering + 'a {
-    let (dwork, awork) = work_maps(parents, children, bead_work);
-
-    move |a: &BeadIdx, b: &BeadIdx| bead_cmp(*a, *b, &dwork, &awork)
-}
-
 /// Computes the **highest-work path** in the Braid.
+///
+/// This recomputes cohorts and work for the whole DAG and is the reference for
+/// [`super::Braid::highest_work_path`], which the node uses and which reads maintained totals.
 ///
 /// This function identifies the most "valuable" path in terms of cumulative **Proof-of-Work (PoW)**
 /// starting from a genesis bead and ending at a tip bead. This is particularly useful for:
@@ -575,13 +595,14 @@ fn work_sort_key_fn<'a>(
 /// Sorting order uses `bead_cmp(...)`, which prioritizes:
 /// - Descendant Work
 /// - Ancestor Work
-/// - Bead Index (tie-breaker)
+/// - Bead Hash (tie-breaker, lower hash wins)
 ///
 /// # Arguments
 ///
 /// * `parents` - A `Relatives` map from bead index to its parent indices.
 /// * `children` - A `Relatives` map from bead index to its child indices.
 /// * `bead_work` - A `HashMap` mapping `BeadIdx` to its intrinsic `Work` value.
+/// * `hashes` - The hash of every bead, indexed by `BeadIdx` (see [`super::Braid::hashes`]).
 ///
 /// # Returns
 ///
@@ -591,21 +612,19 @@ pub fn highest_work_path(
     parents: &Relatives,
     children: &Relatives,
     bead_work: &HashMap<BeadIdx, Work>,
-    // FIXME add descendant_cache
+    hashes: &[BeadHash],
 ) -> Option<Vec<BeadIdx>> {
     if parents.is_empty() {
         return None;
     }
-    let sort_key_fn = work_sort_key_fn(parents, children, bead_work);
-    let mut current = *geneses(parents).iter().max_by(|a, b| sort_key_fn(a, b))?;
+    let (dwork, awork) = work_maps(parents, children, bead_work);
+    let cmp = |a: &&BeadIdx, b: &&BeadIdx| bead_cmp(**a, **b, &dwork, &awork, hashes);
+    let mut current = *geneses(parents).iter().max_by(cmp)?;
     let mut hwpath = vec![current];
 
     let dag_tips = tips(children);
     while !dag_tips.contains(&current) {
-        current = *children
-            .get(&current)?
-            .iter()
-            .max_by(|a, b| sort_key_fn(a, b))?;
+        current = *children.get(&current)?.iter().max_by(cmp)?;
         hwpath.push(current);
     }
 
