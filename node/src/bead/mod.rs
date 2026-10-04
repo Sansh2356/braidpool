@@ -1,4 +1,5 @@
 use crate::committed_metadata::CommittedMetadata;
+use crate::config::PoolNetwork;
 use crate::uncommitted_metadata::UnCommittedMetadata;
 use crate::utils::BeadHash;
 use async_trait::async_trait;
@@ -46,9 +47,63 @@ pub struct Bead {
     pub uncommitted_metadata: UnCommittedMetadata,
 }
 impl Bead {
-    /// Returns the hash of this bead's block header
+    /// Returns the plain Bitcoin hash of this bead's block header.
     pub fn hash(&self) -> BeadHash {
         self.block_header.block_hash()
+    }
+
+    /// Returns the predefined genesis bead of `network`, the single root every braid starts from.
+    pub fn genesis(network: PoolNetwork) -> Bead {
+        use crate::utils::timestamp::MicrosecondTimestamp;
+        use crate::{TimeVec, TxIdVec};
+
+        // 2026-01-01T00:00:00Z
+        const GENESIS_TIME_SECS: u32 = 1_767_225_600;
+        const GENESIS_TARGET: u32 = 0x1d00ffff;
+        const GENESIS_PUBKEY: &str =
+            "020202020202020202020202020202020202020202020202020202020202020202";
+        const GENESIS_SIGNATURE: &str = "3046022100839c1fbc5304de944f697c9f4b1d01d1faeba32d751c0f7acb21ac8a0f436a72022100e89bd46bb3a5a62adc679f659b7ce876d83ee297c7a5587b2011c4fcc72eab45";
+
+        let genesis_time = MicrosecondTimestamp::from_secs(GENESIS_TIME_SECS);
+        // The constants above are valid encodings; `genesis_is_deterministic` checks them.
+        let comm_pub_key = GENESIS_PUBKEY
+            .parse::<bitcoin::PublicKey>()
+            .expect("genesis public key is a valid compressed key");
+        let signature_der = hex::decode(GENESIS_SIGNATURE).expect("genesis signature is valid hex");
+        let signature = bitcoin::ecdsa::Signature {
+            signature: bitcoin::secp256k1::ecdsa::Signature::from_der(&signature_der)
+                .expect("genesis signature is valid DER"),
+            sighash_type: bitcoin::sighash::EcdsaSighashType::All,
+        };
+
+        Bead {
+            block_header: BlockHeader {
+                version: BlockVersion::ONE,
+                prev_blockhash: network.genesis_block_hash(),
+                merkle_root: TxMerkleNode::all_zeros(),
+                time: GENESIS_TIME_SECS,
+                bits: CompactTarget::from_consensus(GENESIS_TARGET),
+                nonce: 0,
+            },
+            committed_metadata: CommittedMetadata {
+                transaction_ids: TxIdVec(Vec::new()),
+                parents: Vec::new(),
+                parent_bead_timestamps: TimeVec(Vec::new()),
+                payout_address: "bc1qgdjqv0av3q56jvd82tkdjpy7gdp9ut8tlqmgrpmv24sq90ecnvqqjwvw97"
+                    .to_string(),
+                start_timestamp: genesis_time,
+                comm_pub_key,
+                min_target: CompactTarget::from_consensus(GENESIS_TARGET),
+                weak_target: CompactTarget::from_consensus(GENESIS_TARGET),
+                miner_ip: "system".to_string(),
+            },
+            uncommitted_metadata: UnCommittedMetadata {
+                extra_nonce_1: 0,
+                extra_nonce_2: 0,
+                broadcast_timestamp: genesis_time,
+                signature,
+            },
+        }
     }
 }
 impl_consensus_encoding!(Bead, block_header, committed_metadata, uncommitted_metadata);
@@ -122,7 +177,7 @@ braidpool_protocol! {
     /// why a bead request could not be fulfilled.
     ///
     /// **Variants:**
-    /// - `GenesisMismatch`: Genesis beads don't match between peers
+    /// - `GenesisMismatch`: The peers' genesis beads differ
     /// - `BeadHashNotFound`: Requested bead hash not found in local store
     pub enum BeadSyncError {
         GenesisMismatch     = 0,

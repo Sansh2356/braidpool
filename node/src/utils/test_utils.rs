@@ -102,7 +102,11 @@ macro_rules! make_test_braid {
             .collect();
 
         // Create and return the braid
-        crate::braid::Braid::new(beads_vector, crate::config::PoolNetwork::Cpunet)
+        crate::braid::Braid::from_beads(
+            beads_vector,
+            crate::braid::ExtendStrategy::default(),
+            crate::config::PoolNetwork::Cpunet,
+        )
     }};
 }
 #[cfg(test)]
@@ -259,9 +263,12 @@ impl JSONBraid {
             .map(|i| beads_to_idx[&i].clone())
             .collect();
 
-        // Let Braid::new handle all the complex parent/children mapping,
-        // tip/genesis detection, and cohort computation
-        Braid::new(beads_vector, PoolNetwork::Cpunet)
+        // Bead 0 is the genesis; Braid handles the parent/children mapping, tips and cohorts
+        Braid::from_beads(
+            beads_vector,
+            crate::braid::ExtendStrategy::default(),
+            PoolNetwork::Cpunet,
+        )
     }
 }
 
@@ -471,7 +478,7 @@ use bitcoin::secp256k1::{Message, Secp256k1, SecretKey};
 #[cfg(test)]
 use bitcoin::{
     block::Version as BlockVersion, hashes::Hash, BlockHash, CompactTarget, EcdsaSighashType,
-    PublicKey, TxMerkleNode,
+    TxMerkleNode,
 };
 #[cfg(test)]
 use rand::rngs::OsRng;
