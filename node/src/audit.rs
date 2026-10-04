@@ -45,7 +45,7 @@ fn create_genesis_bead_for_audit() -> Result<Bead, String> {
 
     let public_key = "020202020202020202020202020202020202020202020202020202020202020202"
         .parse::<bitcoin::PublicKey>()
-        .unwrap();
+        .map_err(|e| format!("Invalid public key: {}", e))?;
 
     // Create committed metadata with no parents
     let committed_metadata = CommittedMetadata {
@@ -561,8 +561,8 @@ impl AuditDAG {
                         .map(|(comp, _, time)| (*comp, *time))
                         .collect();
 
-                    let generation_hash = crate::audit::compute_generation_hash(&generation_inputs)
-                        .expect("No generation hash generated");
+                    let generation_hash =
+                        crate::audit::compute_generation_hash(&generation_inputs)?;
 
                     info!(tip_count = sibling_count, "Restored DAG tips from database");
 
@@ -710,7 +710,7 @@ impl AuditDAG {
                         "Bead added to braid"
                     );
                 }
-                AddBeadStatus::DagAlreadyContainsBead => {
+                AddBeadStatus::DuplicateBead => {
                     warn!(
                         composite_hash = %composite_hash,
                         "Bead already in DAG, treating as idempotent success"
@@ -726,7 +726,7 @@ impl AuditDAG {
                     );
                     return Err("Invalid bead".to_string());
                 }
-                AddBeadStatus::ParentsNotYetReceived => {
+                AddBeadStatus::ParentsMissing => {
                     warn!(
                         composite_hash = %composite_hash,
                         parents = ?bead.committed_metadata.parents,

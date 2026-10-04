@@ -11,12 +11,12 @@ use std::collections::{HashMap, HashSet};
 pub struct Cohort(pub HashSet<usize>);
 #[derive(Debug, Clone)]
 pub enum AddBeadStatus {
-    DagAlreadyContainsBead,
+    DuplicateBead,
     InvalidBead,
     // Returning any promoted orphan beads whose parents have
     // been extended currently .
     BeadAdded { promoted_orphans: Vec<Bead> },
-    ParentsNotYetReceived,
+    ParentsMissing,
 }
 #[derive(Debug, Clone)]
 
@@ -115,7 +115,7 @@ impl Braid {
                 //This is not required if a bead exists in DB it would already been extended to local braid as well
                 // Parent not found and can't be retrieved
                 self.orphan_beads.push(bead.clone());
-                return AddBeadStatus::ParentsNotYetReceived;
+                return AddBeadStatus::ParentsMissing;
             }
         }
         // Already seen this bead
@@ -125,7 +125,7 @@ impl Braid {
             .iter()
             .any(|b| self.compute_bead_hash(b) == bead_hash)
         {
-            return AddBeadStatus::DagAlreadyContainsBead;
+            return AddBeadStatus::DuplicateBead;
         }
 
         // Insert bead into beads vector
@@ -238,13 +238,13 @@ impl Braid {
                         promoted.extend(self.process_orphan_beads());
                         return promoted; // Exit current processing as recursion will handle the rest
                     }
-                    AddBeadStatus::DagAlreadyContainsBead => {
+                    AddBeadStatus::DuplicateBead => {
                         continue;
                     }
                     AddBeadStatus::InvalidBead => {
                         continue;
                     }
-                    AddBeadStatus::ParentsNotYetReceived => {
+                    AddBeadStatus::ParentsMissing => {
                         self.orphan_beads.push(orphan_bead);
                     }
                 }
