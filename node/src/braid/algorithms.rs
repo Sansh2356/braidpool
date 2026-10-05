@@ -1,5 +1,4 @@
-// `Cohort` is still a struct in the parent module until `Braid` moves onto these algorithms
-use super::{BeadIdx, BeadSet, BeadSet as Cohort, Relatives};
+use super::{BeadIdx, BeadSet, Cohort, Relatives};
 use bitcoin::pow::Work;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -406,7 +405,7 @@ pub fn descendant_work(
     //FIXME add descendant_cache
 ) -> HashMap<BeadIdx, Work> {
     let mut previous_work = zero_work();
-    let rev_cohorts: Vec<Cohort> = cohorts.iter().rev().cloned().collect();
+    let rev_cohorts: Vec<super::Cohort> = cohorts.iter().rev().cloned().collect();
 
     let mut retval = HashMap::new();
 
