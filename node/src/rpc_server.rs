@@ -359,13 +359,11 @@ impl RpcServer for RpcServerImpl {
                 let _ = self.dashboard_events.new_bead.send(Some(bead));
                 Ok("Bead added successfully".to_string())
             }
-            AddBeadStatus::DagAlreadyContainsBead => Ok("Bead already exists".to_string()),
+            AddBeadStatus::DuplicateBead => Ok("Bead already exists".to_string()),
             AddBeadStatus::InvalidBead => {
                 Err(ErrorObjectOwned::owned(4, "Invalid bead", None::<()>))
             }
-            AddBeadStatus::ParentsNotYetReceived => {
-                Ok("Bead queued, waiting for parents".to_string())
-            }
+            AddBeadStatus::ParentsMissing => Ok("Bead queued, waiting for parents".to_string()),
         }
     }
 

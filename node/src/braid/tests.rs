@@ -2369,10 +2369,7 @@ fn test_extend_reports_promoted_orphan() {
 
     // Grandchild arrives before its parent `child` -> parked as an orphan.
     assert!(
-        matches!(
-            braid.extend(&grandchild),
-            AddBeadStatus::ParentsNotYetReceived
-        ),
+        matches!(braid.extend(&grandchild), AddBeadStatus::ParentsMissing),
         "grandchild should be parked while its parent is missing"
     );
     assert_eq!(braid.orphan_beads.len(), 1);
@@ -2415,14 +2412,8 @@ fn test_extend_promotes_transitive_orphan_chain() {
         .push(compute_block_hash(&b.block_header, braid.network));
 
     // `c` and `b` arrive before `a`; both are parked.
-    assert!(matches!(
-        braid.extend(&c),
-        AddBeadStatus::ParentsNotYetReceived
-    ));
-    assert!(matches!(
-        braid.extend(&b),
-        AddBeadStatus::ParentsNotYetReceived
-    ));
+    assert!(matches!(braid.extend(&c), AddBeadStatus::ParentsMissing));
+    assert!(matches!(braid.extend(&b), AddBeadStatus::ParentsMissing));
     assert_eq!(braid.orphan_beads.len(), 2);
 
     // `a` connects the whole chain: `b` then `c` are promoted transitively.
