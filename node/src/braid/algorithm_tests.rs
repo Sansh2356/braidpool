@@ -6,6 +6,8 @@ use super::algorithms::*;
 use crate::braid::BeadIdx;
 use crate::braid::{BeadSet, Relatives};
 use crate::relatives;
+use crate::utils::BeadHash;
+use bitcoin::hashes::Hash;
 use bitcoin::Work;
 use std::collections::{HashMap, HashSet};
 
@@ -20,6 +22,17 @@ fn work(v: u64) -> Work {
     let mut bytes = [0u8; 32];
     bytes[24..32].copy_from_slice(&v.to_be_bytes());
     Work::from_be_bytes(bytes)
+}
+
+/// Bead hashes whose values ascend with the bead index, so the lower index wins a hash tie-break
+pub(super) fn index_hashes(n: usize) -> Vec<BeadHash> {
+    (0..n as u64)
+        .map(|i| {
+            let mut bytes = [0u8; 32];
+            bytes[..8].copy_from_slice(&i.to_le_bytes());
+            BeadHash::from_byte_array(bytes)
+        })
+        .collect()
 }
 
 // ============================================================================
@@ -293,7 +306,13 @@ pub fn test_highest_work_path_simple() {
 
     let children = reverse(&parents);
     let bead_work: HashMap<BeadIdx, Work> = parents.keys().map(|&k| (k, work(1))).collect();
-    let path = highest_work_path(&parents, &children, &bead_work).expect("non-empty braid");
+    let path = highest_work_path(
+        &parents,
+        &children,
+        &bead_work,
+        &index_hashes(parents.len()),
+    )
+    .expect("non-empty braid");
 
     // Bead 1 carries more descendant work than bead 2 (it has child 3), so the
     // highest work path must go through it.
@@ -305,7 +324,7 @@ pub fn test_highest_work_path_empty() {
     let parents = relatives!();
     let children = reverse(&parents);
     assert_eq!(
-        highest_work_path(&parents, &children, &HashMap::new()),
+        highest_work_path(&parents, &children, &HashMap::new(), &[]),
         None
     );
 }
@@ -398,19 +417,19 @@ pub fn test_bead_cmp() {
 
     // Test ordering - bead_cmp returns Ordering
     assert_eq!(
-        bead_cmp(1, 0, &work_values, &awork_values),
+        bead_cmp(1, 0, &work_values, &awork_values, &index_hashes(3)),
         std::cmp::Ordering::Greater
     );
     assert_eq!(
-        bead_cmp(0, 1, &work_values, &awork_values),
+        bead_cmp(0, 1, &work_values, &awork_values, &index_hashes(3)),
         std::cmp::Ordering::Less
     );
     assert_eq!(
-        bead_cmp(0, 2, &work_values, &awork_values),
+        bead_cmp(0, 2, &work_values, &awork_values, &index_hashes(3)),
         std::cmp::Ordering::Less
     );
     assert_eq!(
-        bead_cmp(2, 0, &work_values, &awork_values),
+        bead_cmp(2, 0, &work_values, &awork_values, &index_hashes(3)),
         std::cmp::Ordering::Greater
     );
 }
@@ -420,13 +439,28 @@ pub fn test_bead_cmp_tie_breaks() {
     // Equal descendant work: higher ancestor work wins
     let dwork: HashMap<BeadIdx, Work> = HashMap::from([(0, work(5)), (1, work(5)), (2, work(5))]);
     let awork: HashMap<BeadIdx, Work> = HashMap::from([(0, work(1)), (1, work(3)), (2, work(3))]);
-    assert_eq!(bead_cmp(1, 0, &dwork, &awork), std::cmp::Ordering::Greater);
-    assert_eq!(bead_cmp(0, 1, &dwork, &awork), std::cmp::Ordering::Less);
+    assert_eq!(
+        bead_cmp(1, 0, &dwork, &awork, &index_hashes(3)),
+        std::cmp::Ordering::Greater
+    );
+    assert_eq!(
+        bead_cmp(0, 1, &dwork, &awork, &index_hashes(3)),
+        std::cmp::Ordering::Less
+    );
 
     // Equal descendant and ancestor work: the lower index wins
-    assert_eq!(bead_cmp(1, 2, &dwork, &awork), std::cmp::Ordering::Greater);
-    assert_eq!(bead_cmp(2, 1, &dwork, &awork), std::cmp::Ordering::Less);
-    assert_eq!(bead_cmp(1, 1, &dwork, &awork), std::cmp::Ordering::Equal);
+    assert_eq!(
+        bead_cmp(1, 2, &dwork, &awork, &index_hashes(3)),
+        std::cmp::Ordering::Greater
+    );
+    assert_eq!(
+        bead_cmp(2, 1, &dwork, &awork, &index_hashes(3)),
+        std::cmp::Ordering::Less
+    );
+    assert_eq!(
+        bead_cmp(1, 1, &dwork, &awork, &index_hashes(3)),
+        std::cmp::Ordering::Equal
+    );
 }
 
 #[test]
@@ -701,8 +735,13 @@ pub fn test_highest_work_path_from_files() {
             .map(|(k, v)| (*k, work(*v as u64)))
             .collect();
 
-        let path =
-            highest_work_path(&parents, &children, &bead_work).expect("test braids are non-empty");
+        let path = highest_work_path(
+            &parents,
+            &children,
+            &bead_work,
+            &index_hashes(parents.len()),
+        )
+        .expect("test braids are non-empty");
 
         // The algorithm must produce EXACT results matching the JSON test cases
         assert_eq!(
