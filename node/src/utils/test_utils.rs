@@ -1,3 +1,15 @@
+// A macro for making parents and children relationships for testing like:
+// parents: relatives!(0 => [], 1 => [0])
+#[macro_export]
+macro_rules! relatives {
+    () => {
+        std::collections::HashMap::new()
+    };
+    ($($k:expr => [$($v:expr),*]),* $(,)?) => {
+        std::collections::HashMap::from([$(($k, [$($v),*].into_iter().collect()),)*])
+    };
+}
+
 #[cfg(test)]
 use super::BeadHash;
 #[cfg(test)]
@@ -40,6 +52,76 @@ use serde::{Deserialize, Serialize};
 use crate::utils::timestamp::MicrosecondTimestamp;
 #[cfg(test)]
 use crate::{braid::Braid, utils::compute_block_hash};
+
+// JSONBraid structure for loading test data from JSON files with HashSet for algorithm compatibility
+#[cfg(test)]
+#[derive(Clone, Debug, Deserialize)]
+pub struct JSONBraid {
+    pub description: String,
+    pub parents: crate::braid::Relatives,
+    pub children: crate::braid::Relatives,
+    pub geneses: crate::braid::BeadSet,
+    pub tips: crate::braid::BeadSet,
+    pub cohorts: Vec<crate::braid::BeadSet>,
+    // this is populated in the test files but always 1. TODO: improve tests with different work
+    // per bead to further exercise hwpath and descendant_work
+    #[allow(unused)]
+    pub bead_work: std::collections::HashMap<crate::braid::BeadIdx, u32>, // FIXME Work
+    pub work: std::collections::HashMap<crate::braid::BeadIdx, u32>, // FIXME Work
+    pub highest_work_path: Vec<crate::braid::BeadIdx>,
+}
+
+#[cfg(test)]
+impl JSONBraid {
+    /// Load and convert from JSON file to HashSet format
+    /// Panics if the file cannot be loaded, with a clear error message including the filename
+    pub fn load(file_path: &str) -> Self {
+        let file_content = std::fs::read_to_string(file_path)
+            .unwrap_or_else(|e| panic!("Failed to read test file '{}': {}", file_path, e));
+        serde_json::from_str(&file_content)
+            .unwrap_or_else(|e| panic!("Failed to parse JSON in test file '{}': {}", file_path, e))
+    }
+
+    /// Returns an iterator over all JSONBraids in the test directory
+    pub fn tests() -> Box<dyn Iterator<Item = (JSONBraid, String)>> {
+        // Get the project root directory from Cargo's environment variable
+        let project_root = env!("CARGO_MANIFEST_DIR");
+        let test_dir = format!("{}/../{}", project_root, BRAIDTESTDIRECTORY);
+
+        let dir_entries = std::fs::read_dir(&test_dir)
+            .unwrap_or_else(|e| panic!("Failed to read test directory '{}': {}", test_dir, e));
+
+        // Collect all JSON test files first
+        let test_files: Vec<(JSONBraid, String)> = dir_entries
+            .filter_map(|entry| {
+                let entry = entry.unwrap_or_else(|e| panic!("Failed to read directory: {:?}", e));
+                let path = entry.path();
+
+                // Only include JSON files
+                if path.extension().and_then(|s| s.to_str()) == Some("json") {
+                    let file_path = path
+                        .to_str()
+                        .expect("Cannot stringify file path (Invalid UTF-8?)");
+                    let filename = path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    Some((JSONBraid::load(file_path), filename))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Panic if no test files were found
+        if test_files.is_empty() {
+            panic!("No JSON test files found in directory '{}'", test_dir);
+        }
+
+        Box::new(test_files.into_iter())
+    }
+}
 
 #[cfg(test)]
 #[derive(Clone, Debug, Serialize, Deserialize)]

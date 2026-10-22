@@ -7,6 +7,16 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
+
+pub mod algorithms;
+
+// A type alias which represents an index into Braid::beads
+pub type BeadIdx = usize;
+// A type representing parents, children, ancestors, or descendants
+pub type Relatives = HashMap<BeadIdx, HashSet<BeadIdx>>;
+// A type representing a set of beads indexed in Braid::beads
+pub type BeadSet = HashSet<BeadIdx>;
+
 #[derive(Clone, Debug, Serialize, PartialEq, Deserialize)]
 pub struct Cohort(pub HashSet<usize>);
 #[derive(Debug, Clone)]
@@ -1221,6 +1231,9 @@ pub mod consensus_functions {
         return true;
     }
 }
+
+#[cfg(test)]
+mod algorithm_tests;
 
 #[cfg(test)]
 mod tests;
