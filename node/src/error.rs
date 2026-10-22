@@ -7,26 +7,16 @@ use std::{fmt, path::PathBuf};
 use tokio::sync::oneshot;
 
 #[derive(Debug)]
-//Custom error class for handling all the braid consensus errors
 pub enum BraidError {
-    MissingAncestorWork,
-    HighestWorkBeadFetchFailed,
     /// A bead's committed parent hash is not present in the braid index. This is
     /// a consensus/DAG invariant violation: a connected bead must have all of
     /// its parents resolvable.
-    MissingParent {
-        bead: BeadHash,
-        parent: BeadHash,
-    },
+    MissingParent { bead: BeadHash, parent: BeadHash },
     /// A bead is not present in the braid index when persistence was attempted,
     /// despite the braid reporting it as added. Indicates a consensus/logic bug.
-    BeadNotIndexed {
-        bead: BeadHash,
-    },
+    BeadNotIndexed { bead: BeadHash },
     /// The bead was resolved but the db channel closed due to an error
-    PersistenceChannelClosed {
-        bead: BeadHash,
-    },
+    PersistenceChannelClosed { bead: BeadHash },
 }
 #[derive(Debug)]
 pub enum BraidRPCError {
@@ -98,10 +88,20 @@ pub enum DBErrors {
         error: String,
         url: String,
     },
+    /// The database was built on a different genesis bead than this node's predefined one
+    GenesisMismatch {
+        /// Hash of this node's genesis bead
+        expected: BeadHash,
+        /// Hash of the first bead stored in the database
+        found: BeadHash,
+    },
 }
 impl fmt::Display for DBErrors {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            DBErrors::GenesisMismatch { expected, found } => {
+                write!(f, "Database starts from genesis bead {found}, but this node's genesis is {expected}; use a fresh datadir")
+            }
             DBErrors::ConnectionUrlNotParsed { error, url } => {
                 write!(f,"Connection URL - {:?} could not be parsed for building connection configuration and initializing connection due to - {:?}",url,error)
             }
@@ -483,10 +483,6 @@ impl fmt::Display for BraidRPCError {
 impl fmt::Display for BraidError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            BraidError::MissingAncestorWork => write!(f, "Missing ancestor work map"),
-            BraidError::HighestWorkBeadFetchFailed => {
-                write!(f, "An error occurred while fetching the highest work bead")
-            }
             BraidError::MissingParent { bead, parent } => {
                 write!(
                     f,

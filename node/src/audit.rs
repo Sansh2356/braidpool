@@ -45,7 +45,7 @@ fn create_genesis_bead_for_audit() -> Result<Bead, String> {
 
     let public_key = "020202020202020202020202020202020202020202020202020202020202020202"
         .parse::<bitcoin::PublicKey>()
-        .unwrap();
+        .map_err(|e| format!("Invalid public key: {}", e))?;
 
     // Create committed metadata with no parents
     let committed_metadata = CommittedMetadata {
@@ -470,7 +470,7 @@ impl AuditDAG {
                 if beads.is_empty() {
                     info!("No beads found in audit database, creating and persisting genesis bead");
 
-                    // Create genesis bead in memory
+                    // Audit mode has its own genesis bead, distinct from `Bead::genesis`
                     let genesis_bead = create_genesis_bead_for_audit()?;
                     let genesis_block_hash =
                         compute_block_hash(&genesis_bead.block_header, network);
@@ -513,7 +513,7 @@ impl AuditDAG {
 
                     {
                         let mut braid = self.braid.write().await;
-                        *braid = crate::braid::Braid::new(vec![genesis_bead.clone()], network);
+                        *braid = crate::braid::Braid::new(genesis_bead.clone(), network);
                     }
 
                     self.active_parents = vec![(
@@ -533,16 +533,30 @@ impl AuditDAG {
                     Ok(Some(generation_hash))
                 } else {
                     let sibling_count = beads.len();
-                    {
-                        // This allows us to start with the last mined bead tip retrieved from the database
-                        // instead of the genesis, this creates a valid in-memory DAG which correctly
-                        // refers to the past history (commitment), but if the database doesn't contain any
-                        // entry of a bead, possibly running the node for the first time or after flushing
-                        // the database then the in-memory bead will start from the genesis.
-                        let mut braid = self.braid.write().await;
-                        let only_beads: Vec<Bead> = beads.iter().map(|(b, _)| b.clone()).collect();
-                        *braid = crate::braid::Braid::new(only_beads, network);
-                    }
+                    // The audit genesis is created at first start, so its hash is only
+                    // known from the database.
+                    let genesis = db_handler
+                        .get_genesis_hash()
+                        .await
+                        .map_err(|e| format!("Failed to load audit genesis bead: {}", e))?
+                        .ok_or("Audit database has beads but no genesis bead")?;
+                    // This allows us to start with the last mined bead tip retrieved from the database
+                    // instead of the genesis, this creates a valid in-memory DAG which correctly
+                    // refers to the past history (commitment), but if the database doesn't contain any
+                    // entry of a bead, possibly running the node for the first time or after flushing
+                    // the database then the in-memory bead will start from the genesis.
+                    let only_beads: Vec<Bead> = beads.iter().map(|(b, _)| b.clone()).collect();
+                    let restored = crate::braid::Braid::from_roots(genesis, only_beads, network);
+                    // A tip the braid did not take cannot be a parent of the next bead
+                    let beads: Vec<_> = beads
+                        .into_iter()
+                        .filter(|(bead, _)| {
+                            restored
+                                .index
+                                .contains_key(&compute_block_hash(&bead.block_header, network))
+                        })
+                        .collect();
+                    *self.braid.write().await = restored;
 
                     self.active_parents = beads
                         .into_iter()
@@ -561,8 +575,8 @@ impl AuditDAG {
                         .map(|(comp, _, time)| (*comp, *time))
                         .collect();
 
-                    let generation_hash = crate::audit::compute_generation_hash(&generation_inputs)
-                        .expect("No generation hash generated");
+                    let generation_hash =
+                        crate::audit::compute_generation_hash(&generation_inputs)?;
 
                     info!(tip_count = sibling_count, "Restored DAG tips from database");
 
@@ -710,7 +724,7 @@ impl AuditDAG {
                         "Bead added to braid"
                     );
                 }
-                AddBeadStatus::DagAlreadyContainsBead => {
+                AddBeadStatus::DuplicateBead => {
                     warn!(
                         composite_hash = %composite_hash,
                         "Bead already in DAG, treating as idempotent success"
@@ -726,7 +740,7 @@ impl AuditDAG {
                     );
                     return Err("Invalid bead".to_string());
                 }
-                AddBeadStatus::ParentsNotYetReceived => {
+                AddBeadStatus::ParentsMissing => {
                     warn!(
                         composite_hash = %composite_hash,
                         parents = ?bead.committed_metadata.parents,
@@ -1140,7 +1154,7 @@ mod tests {
     /// Verify a new connected miner is assigned with a new dedicated memory space
     fn test_audit_dag_register_miner() {
         let braid = Arc::new(RwLock::new(Braid::new(
-            vec![],
+            Bead::genesis(PoolNetwork::Bitcoin(bitcoin::Network::Bitcoin)),
             PoolNetwork::Bitcoin(bitcoin::Network::Bitcoin),
         )));
         let mut audit_dag = AuditDAG::new(braid);
@@ -1161,7 +1175,7 @@ mod tests {
     /// Verify the share acceptance, rejection and stats calculation logic.
     fn test_miner_stats_calculations() {
         let braid = Arc::new(RwLock::new(Braid::new(
-            vec![],
+            Bead::genesis(PoolNetwork::Bitcoin(bitcoin::Network::Bitcoin)),
             PoolNetwork::Bitcoin(bitcoin::Network::Bitcoin),
         )));
         let mut audit_dag = AuditDAG::new(braid);
