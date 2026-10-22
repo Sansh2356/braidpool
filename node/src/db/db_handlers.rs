@@ -468,6 +468,16 @@ pub async fn fetch_beads_in_batch(
 
         for row in &bead_rows {
             let bead_id: i64 = row.get("bead_id");
+            // Callers replay the beads in order and give the k-th one braid index k, so a
+            // missing row would shift every later bead onto another bead's id.
+            let expected_id = (all_beads.len() + batch.len()) as i64;
+            if bead_id != expected_id {
+                return Err(DBErrors::TupleNotFetched {
+                    error: format!(
+                        "Bead ids are not contiguous: expected id {expected_id}, found {bead_id}; a bead was not persisted, use a fresh datadir"
+                    ),
+                });
+            }
             let bead = build_bead_from_row(row)?;
             batch.push(bead);
             ids.push(bead_id);

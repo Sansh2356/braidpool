@@ -1,3 +1,4 @@
+use super::algorithm_tests::index_hashes;
 use super::algorithms::*;
 use super::{AddBeadStatus, BeadIdx, Braid, ExtendStrategy};
 use crate::bead::Bead;
@@ -110,7 +111,7 @@ pub fn test_orphanage_occupancy() {
     let parent = emit_Bead(&[&genesis]);
     let orphan_child = emit_Bead(&[&parent]); // will be missing parent initially
 
-    let mut braid = Braid::new(vec![genesis.clone()], PoolNetwork::Cpunet);
+    let mut braid = Braid::new(genesis.clone(), PoolNetwork::Cpunet);
 
     // The child arrives before its parent and is parked in the orphanage
     let status = braid.extend(&orphan_child);
@@ -157,7 +158,7 @@ pub fn test_extend_functionality() {
     // Create a braid with one bead.
     let test_bead_0 = emit_Bead(&[]);
 
-    let mut test_braid = Braid::new(vec![test_bead_0.clone()], PoolNetwork::Cpunet);
+    let mut test_braid = Braid::new(test_bead_0.clone(), PoolNetwork::Cpunet);
 
     // Verify initial state
     assert_eq!(test_braid.beads.len(), 1);
@@ -223,7 +224,7 @@ pub fn test_extend_functionality() {
     assert_eq!(test_braid.cohorts, cohorts!([0], [1], [2], [3, 4], [5]));
 
     // Verify braid integrity
-    assert_eq!(test_braid.geneses, beadset![0]); // Still only one genesis
+    assert_eq!(geneses(&test_braid.parents), beadset![0]); // Still only one genesis
     assert_eq!(test_braid.tips, beadset![5]); // Bead 5 is the only tip
     assert!(
         test_braid.orphanage.is_empty() && test_braid.missing_parents.is_empty(),
@@ -366,7 +367,11 @@ pub fn test_json_braid_end_to_end() {
         non_genesis_beads.shuffle(&mut rng);
 
         // Create braid with genesis beads first
-        let mut braid = Braid::new(genesis_beads, PoolNetwork::Cpunet);
+        let mut braid = Braid::from_beads(
+            genesis_beads,
+            ExtendStrategy::default(),
+            PoolNetwork::Cpunet,
+        );
 
         // Extend with other beads in random order
         for (i, bead) in non_genesis_beads.iter().enumerate() {
@@ -432,13 +437,11 @@ pub fn test_json_braid_end_to_end() {
         //    filename
         //);
         assert_eq!(
-            braid
-                .geneses
+            geneses(&braid.parents)
                 .iter()
                 .map(|&i| braid.beads[i].hash())
                 .collect::<HashSet<_>>(),
-            reference_braid
-                .geneses
+            geneses(&reference_braid.parents)
                 .iter()
                 .map(|&i| reference_braid.beads[i].hash())
                 .collect::<HashSet<_>>(),
@@ -566,7 +569,8 @@ pub fn test_diamond_path_highest_work() {
 
     // Test the highest work path algorithm
     let bead_work: HashMap<BeadIdx, Work> = parents.keys().map(|&k| (k, work(1))).collect();
-    let path = highest_work_path(&parents, &children, &bead_work).expect("non-empty braid");
+    let path = highest_work_path(&parents, &children, &bead_work, &index_hashes(4))
+        .expect("non-empty braid");
 
     // Beads 1 and 2 tie on descendant and ancestor work, so the lower index wins
     assert_eq!(path, vec![0, 1, 3]);
@@ -611,7 +615,7 @@ pub fn test_make_test_braid_macro() {
 #[test]
 fn test_extend_without_orphans_promotes_nothing() {
     let genesis = emit_Bead(&[]);
-    let mut braid = Braid::new(vec![genesis.clone()], PoolNetwork::Cpunet);
+    let mut braid = Braid::new(genesis.clone(), PoolNetwork::Cpunet);
 
     let child = emit_Bead(&[&genesis]);
     assert_eq!(
@@ -627,7 +631,7 @@ fn test_extend_without_orphans_promotes_nothing() {
 #[test]
 fn test_extend_reports_promoted_orphan() {
     let genesis = emit_Bead(&[]);
-    let mut braid = Braid::new(vec![genesis.clone()], PoolNetwork::Cpunet);
+    let mut braid = Braid::new(genesis.clone(), PoolNetwork::Cpunet);
 
     let child = emit_Bead(&[&genesis]);
     let grandchild = emit_Bead(&[&child]);
@@ -655,7 +659,7 @@ fn test_extend_reports_promoted_orphan() {
 #[test]
 fn test_extend_duplicate_orphan() {
     let genesis = emit_Bead(&[]);
-    let mut braid = Braid::new(vec![genesis.clone()], PoolNetwork::Cpunet);
+    let mut braid = Braid::new(genesis.clone(), PoolNetwork::Cpunet);
     let child = emit_Bead(&[&genesis]);
     let grandchild = emit_Bead(&[&child]);
 
@@ -669,7 +673,7 @@ fn test_extend_duplicate_orphan() {
 #[test]
 fn test_extend_promotes_transitive_orphan_chain() {
     let genesis = emit_Bead(&[]);
-    let mut braid = Braid::new(vec![genesis.clone()], PoolNetwork::Cpunet);
+    let mut braid = Braid::new(genesis.clone(), PoolNetwork::Cpunet);
 
     let a = emit_Bead(&[&genesis]);
     let b = emit_Bead(&[&a]);
@@ -701,7 +705,7 @@ fn test_extend_long_orphan_chain_does_not_overflow() {
         chain.push(next);
     }
 
-    let mut braid = Braid::new(vec![genesis], PoolNetwork::Cpunet);
+    let mut braid = Braid::new(genesis, PoolNetwork::Cpunet);
     for bead in chain.iter().skip(1).rev() {
         assert_eq!(braid.extend(bead), AddBeadStatus::ParentsMissing);
     }
@@ -719,7 +723,7 @@ fn test_extend_long_orphan_chain_does_not_overflow() {
 #[test]
 fn test_orphan_waits_for_all_parents() {
     let genesis = emit_Bead(&[]);
-    let mut braid = Braid::new(vec![genesis.clone()], PoolNetwork::Cpunet);
+    let mut braid = Braid::new(genesis.clone(), PoolNetwork::Cpunet);
 
     let left = emit_Bead(&[&genesis]);
     let right = emit_Bead(&[&genesis]);
@@ -810,7 +814,7 @@ fn test_get_beads_after_is_topologically_ordered() {
     assert_eq!(returned.len(), 7);
 
     // A syncing peer must be able to extend with these beads in order without orphans
-    let mut replica = Braid::new(vec![braid.beads[0].clone()], PoolNetwork::Cpunet);
+    let mut replica = Braid::new(braid.beads[0].clone(), PoolNetwork::Cpunet);
     for bead in &returned {
         assert!(matches!(
             replica.extend(bead),
@@ -880,7 +884,7 @@ fn check_strategy(strategy: ExtendStrategy, shuffle: bool) {
         if shuffle {
             beads[1..].shuffle(&mut rng);
         }
-        let braid = Braid::new_with_strategy(beads, strategy, PoolNetwork::Cpunet);
+        let braid = Braid::from_beads(beads, strategy, PoolNetwork::Cpunet);
         assert!(braid.orphanage.is_empty());
         assert_eq!(braid.beads.len(), n);
         assert_matches_reference(&braid, &format!("{strategy:?} trial {trial}"));
@@ -911,7 +915,7 @@ fn test_cached_strategy_matches_reference_out_of_order() {
 fn test_cached_strategy_matches_json_braids() {
     for (json_braid, filename) in JSONBraid::tests() {
         let reference = json_braid.make_Braid();
-        let braid = Braid::new_with_strategy(
+        let braid = Braid::from_beads(
             reference.beads.clone(),
             ExtendStrategy::Cached,
             PoolNetwork::Cpunet,
@@ -938,7 +942,7 @@ fn test_cached_strategy_step_by_step() {
         let window = rng.gen_range(2..6);
         let beads = random_dag_beads(&mut rng, n, window);
         let mut braid = Braid::new_with_strategy(
-            vec![beads[0].clone()],
+            beads[0].clone(),
             ExtendStrategy::Cached,
             PoolNetwork::Cpunet,
         );
@@ -972,7 +976,7 @@ fn test_strategies_keep_cut_after_cohort_with_internal_links() {
         ExtendStrategy::Cached,
         ExtendStrategy::NoCache,
     ] {
-        let braid = Braid::new_with_strategy(beads.clone(), strategy, PoolNetwork::Cpunet);
+        let braid = Braid::from_beads(beads.clone(), strategy, PoolNetwork::Cpunet);
         assert_eq!(braid.cohorts, cohorts!([0, 1], [2, 3]), "{strategy:?}");
     }
 }
