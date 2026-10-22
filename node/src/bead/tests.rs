@@ -380,3 +380,20 @@ fn test_bead_sync_error_codec() {
     let result = BeadSyncError::consensus_decode(&mut cursor);
     assert!(result.is_err(), "Should fail to decode invalid error type");
 }
+
+#[test]
+fn genesis_is_deterministic() {
+    for network in [
+        PoolNetwork::Cpunet,
+        PoolNetwork::Bitcoin(bitcoin::Network::Bitcoin),
+    ] {
+        // Building the genesis also checks that its hardcoded key and signature decode
+        let genesis = Bead::genesis(network);
+        assert!(genesis.committed_metadata.parents.is_empty());
+        assert_eq!(genesis.hash(), Bead::genesis(network).hash());
+        assert_eq!(
+            genesis.block_header.prev_blockhash,
+            network.genesis_block_hash()
+        );
+    }
+}
