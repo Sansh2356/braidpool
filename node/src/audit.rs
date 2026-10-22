@@ -45,7 +45,7 @@ fn create_genesis_bead_for_audit() -> Result<Bead, String> {
 
     let public_key = "020202020202020202020202020202020202020202020202020202020202020202"
         .parse::<bitcoin::PublicKey>()
-        .map_err(|e| format!("Invalid public key: {}", e))?;
+        .unwrap();
 
     // Create committed metadata with no parents
     let committed_metadata = CommittedMetadata {
@@ -541,7 +541,7 @@ impl AuditDAG {
                         // the database then the in-memory bead will start from the genesis.
                         let mut braid = self.braid.write().await;
                         let only_beads: Vec<Bead> = beads.iter().map(|(b, _)| b.clone()).collect();
-                        *braid = crate::braid::Braid::new(only_beads, network);
+                        *braid = crate::braid::Braid::from_roots(only_beads, network);
                     }
 
                     self.active_parents = beads
@@ -561,8 +561,8 @@ impl AuditDAG {
                         .map(|(comp, _, time)| (*comp, *time))
                         .collect();
 
-                    let generation_hash =
-                        crate::audit::compute_generation_hash(&generation_inputs)?;
+                    let generation_hash = crate::audit::compute_generation_hash(&generation_inputs)
+                        .expect("No generation hash generated");
 
                     info!(tip_count = sibling_count, "Restored DAG tips from database");
 
@@ -710,7 +710,7 @@ impl AuditDAG {
                         "Bead added to braid"
                     );
                 }
-                AddBeadStatus::DuplicateBead => {
+                AddBeadStatus::DuplicateBead | AddBeadStatus::DagAlreadyContainsBead => {
                     warn!(
                         composite_hash = %composite_hash,
                         "Bead already in DAG, treating as idempotent success"
@@ -726,7 +726,7 @@ impl AuditDAG {
                     );
                     return Err("Invalid bead".to_string());
                 }
-                AddBeadStatus::ParentsMissing => {
+                AddBeadStatus::ParentsMissing | AddBeadStatus::ParentsNotYetReceived => {
                     warn!(
                         composite_hash = %composite_hash,
                         parents = ?bead.committed_metadata.parents,
