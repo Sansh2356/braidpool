@@ -1315,14 +1315,17 @@ pub fn test_highest_work_path_1() {
 }
 #[test]
 pub fn test_diamond_path_highest_work() {
-    let test_bead_0 = emit_bead();
-    let mut test_bead_1 = emit_bead();
-
-    let mut test_bead_2 = emit_bead();
-
-    let mut test_bead_3 = emit_bead();
-
-    let mut test_bead_4 = emit_bead();
+    // Assign beads to indices in hash order so the highest-work path tie-break
+    // (lowest bead hash wins) reproduces the id-based ordering these test
+    // vectors expect.
+    let mut emitted: Vec<Bead> = (0..5).map(|_| emit_bead()).collect();
+    emitted.sort_by_key(|bead| bead.block_header.block_hash());
+    let mut emitted = emitted.into_iter();
+    let test_bead_0 = emitted.next().unwrap();
+    let mut test_bead_1 = emitted.next().unwrap();
+    let mut test_bead_2 = emitted.next().unwrap();
+    let mut test_bead_3 = emitted.next().unwrap();
+    let mut test_bead_4 = emitted.next().unwrap();
 
     test_bead_1
         .committed_metadata
