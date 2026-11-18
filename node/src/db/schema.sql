@@ -27,10 +27,14 @@ CREATE TABLE IF NOT EXISTS Bead (
 );
 
 -- 2. Transactions
+-- `idx` records the transaction's position within the bead so the committed
+-- transaction_ids Vec (which is committed to hashMerkleRoot) can be
+-- reconstructed in its original block order.
 CREATE TABLE IF NOT EXISTS Transactions (
       bead_id           INTEGER NOT NULL REFERENCES Bead(id),
+      idx               INTEGER NOT NULL,
       txid              BLOB,
-      UNIQUE (bead_id, txid)
+      UNIQUE (bead_id, idx)
 );
 
 -- 3. Cohorts
